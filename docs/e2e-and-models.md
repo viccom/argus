@@ -1,0 +1,121 @@
+# 端到端验证与模型工程笔记
+
+> 来源:vision-ext 11 个推理端点从零到全量端到端打通的实操记录。
+> 环境:Ubuntu 24.04 / 16C31G 共享虚拟机 / rust-onnx-infer (ort 2.0.0-rc.13, load-dynamic) / ORT 1.26.0。
+
+## 1. 模型下载
+
+### 1.1 找下载源的优先级
+
+1. **先读消费库的源码注释**。rust-onnx-infer 的 `license_plate.rs` 文档注释里就写着"已核实可下载"的直链(hpc203 仓库的 mnet_plate / Final_LPRNet_model),省掉全部搜索。上游作者往往已经踩过找模型的坑。
+2. **官方组织仓库**:OpenCV Zoo 全系模型已迁到 HuggingFace `opencv/` 组织(YuNet、SFace、PP-HumanSeg 等),还有 `opencv/opencv_contribution` 收录 caffe→onnx 官方转换版(east、wechat_qr、yolov8n 等)。
+3. **第三方预导出**:onnx-community、Xenova 等把常见模型转好了(depth-anything、yolov8n-pose 的 `onnx/model.onnx`)。注意核对输出格式是否与消费代码匹配(见 1.4)。
+4. **都没有 → 自己导出/转换**(见 §2)。
+
+### 1.2 国内加速
+
+| 途径 | 用法 |
+|---|---|
+| HF 镜像 | 域名替换 `huggingface.co` → `hf-mirror.com`。下载 `/resolve/main/<path>`;列文件 `/api/models/<repo>` 取 `.siblings[].rfilename`;搜索 `/api/models?author=opencv&search=qr` |
+| GitHub release 资产 | `gh release download v8.3.0 -R ultralytics/assets -p 'yolov8n-obb.pt'`(gh 已认证,比匿名 API 稳;api.github.com 匿名易限流) |
+| GitHub raw 失败时 | 依次试直连 → `ghproxy.net` 前缀。`gh api` 走认证通道通常直连可用 |
+| 国内 model zoo CDN | Rockchip `rknn_model_zoo` 的 download_model.sh 指向联想云盘,下载快但模型可能被改过(见 1.4) |
+
+### 1.3 搜源技巧
+
+- **GitHub code search 不索引二进制**:`filename:xxx.onnx` 恒为 0 结果。但**搜文件名字符串引用**有效:`gh api -X GET 'search/code?q="yolov8n-obb.onnx"'` 能定位到引用它的 model zoo 配置(axelera 的 yaml、Rockchip 的 download_model.sh 都是这么找到的),里面往往就有下载 URL。
+- 仓库消失的替代路径:wilinz/wxscan-weights(HF)已删 → ① HF `search=wxscan`/`author=wilinz` 找 fork/改名;② GitHub 搜同名仓库(可能只剩 tflite);③ 找原始 caffe 模型自己转(OpenCV 官方就是这么做的,`opencv_contribution` 里连 `convert_to_onnx.py` 都给你);④ 查消费库 issue/注释里的 SHA256,用于校验找到的镜像是否同一文件。
+
+### 1.4 下载后必做验证
+
+```bash
+# ① 魔数:ONNX 是 protobuf,0x08 开头合法;404 页/HTML 一眼识别
+xxd -l 4 -p model.onnx        # 期望 080X12XX
+file model.onnx               # "data" 合法;出现 "HTML" 即假文件
+
+# ② 签名核对:输入输出名/shape 必须与消费代码的假设一致
+uv venv /tmp/onnx-check-env && uv pip install --python /tmp/onnx-check-env/bin/python onnx
+/tmp/onnx-check-env/bin/python -c "
+import onnx
+m = onnx.load('model.onnx')
+for i in m.graph.input:  print('in :', i.name, [d.dim_param or d.dim_value for d in i.type.tensor_type.shape.dim])
+for o in m.graph.output: print('out:', o.name, [d.dim_param or d.dim_value for d in o.type.tensor_type.shape.dim])
+"
+```
+
+签名不符的典型事故(全部实际发生过):
+
+| 拿到的 | 期望的 | 后果 |
+|---|---|---|
+| Rockchip 版 yolov8n-obb:3 个裁剪中间头输出 `[1,79,H,W]`+`[1,1,8400]` | 标准 `[1, 4+1+nc, 8400]` 单输出 | 后处理报"通道数 1 < 6" |
+| OpenCV 版 wechat_qr:输入 `[1,1,384,384]`、输出 `detection_output [1,1,1,7]`(含 PriorBox/DetectionOutput) | 输入 416、输出 `mbox_loc [1,32448]` + `mbox_conf_flatten [1,16224]` | 无法接入,需图手术(§2.3) |
+| YOLOv8 End2End 导出 `[1,M,7]` vs 传统 `[1,20,8400]` | 消费方认其一 | 布局判定分支不同,先 dump shape 再对号 |
+
+## 2. 模型导出
+
+### 2.1 环境(yolo-rs/.venv 现成可用)
+
+```
+Python 3.12 / torch 2.14.0 / ultralytics 8.4.142 / onnx 1.16.2 / onnxslim 0.1.96
+```
+
+官方权重:`gh release download v8.3.0 -R ultralytics/assets -p 'yolov8n-obb.pt'`。
+
+### 2.2 Ultralytics 导出
+
+```python
+from ultralytics import YOLO
+YOLO('yolov8n-obb.pt').export(format='onnx', imgsz=640)   # 5.1s, 11.9MB, CPU 环境即可
+```
+
+要点:**优先官方导出而非第三方转换版**。官方 `yolov8n-obb` 导出为传统布局 `[1,20,8400]`(4 box + 1 angle + 15 DOTA 类),是 rust-onnx-infer 测试覆盖的路径;第三方(axelera End2End `[1,300,7]`、Rockchip 裁剪头)兼容性各异。导出后务必按 §1.4 核签名。
+
+### 2.3 ONNX 图手术(改官方转换版适配私有后处理)
+
+实例:OpenCV 官方版 wechat_qr(384 输入 + PriorBox/DetectionOutput 尾层)→ rust-onnx-infer 需要的裁剪版(416 输入 + 中间张量输出)。用 onnx 库四步:
+
+1. **改输入尺寸**:`graph.input[0]` 各 dim 384→416。anchors 换算:416 → 26×26(step16) + 4×13×13(step32) = 1352 位置 × 6 框 = 8112 anchors → loc `[1,32448]`、conf `[1,16224]`(384 则 1152×6=6912 → 27648/13824)。
+2. **重算 Reshape/Flatten 常量**:`cls1/flatten_shape [1,6912]→[1,8112]` 等 11 个 initializer 同步改。
+3. **裁尾**:从新输出 `{mbox_loc, mbox_conf_flatten}` 做反向可达分析,删除不可达节点(PriorBox×5 + Concat + DetectionOutput 共 7 个)。
+4. **重建 `graph.output`**(ValueInfoProto 声明新 shape)→ `onnx.checker.check_model` 校验 → 保存。
+
+已知无害副作用:ORT 加载时警告 `Expected shape from model of {1,27648} does not match actual shape of {1,32448}`——shape inference 缓存的旧值,实际 Reshape 用的是改过的 initializer,推理正确。
+
+## 3. 端到端测试
+
+### 3.1 ORT 动态库(load-dynamic 路线)
+
+- 运行时需 `ORT_DYLIB_PATH` 指向 libonnxruntime.so;yolo-rs 发行版 tarball 自带 1.26.0 可直接解压用。
+- **版本检查坑**:报 `Failed to load ONNX Runtime dylib: BadVersion { version_str: "1.26.0" }` 时,不是库坏了。ort-sys 的 `ORT_API_VERSION = 17 + Σ(api-N features)`;ort 2.0.0-rc.13 的检查用 ORT 库的 **release minor** 与 `ORT_API_VERSION` 比较,而 ORT 1.18 起 **API version = release minor + 1**。启了 `api-27`(=27)就会拒绝 1.26.0(minor=26)。**处置:消费方 feature 降为 `api-26`**,ORT 库向后兼容,接口无损。
+
+### 3.2 服务生命周期
+
+- **引擎实例缓存在 OnceCell,且后处理失败也会缓存**(失败发生在推理后而非加载时)。**替换模型文件后必须重启服务**,否则一直在跑内存里的旧模型——症状是"换了文件、报错一字不差"。
+- 环境变量在每次新 shell 里不持久:`source .env.build && source .env.runtime && 启动+测试` 必须同一调用内完成;长驻服务用后台任务方式启动。
+
+### 3.3 测试方法
+
+```bash
+# 冒烟顺序:健康 → 逐端点 → 错误路径 → 引擎清单
+curl -s localhost:7042/health -H "X-API-Key: $KEY"
+curl -s -X POST localhost:7042/detect -H "X-API-Key: $KEY" -F "file=@testdata/bus.jpg" | jq '{status, count: .data.count}'
+curl -s -X POST localhost:7042/qr      -H "X-API-Key: $KEY" -F "file=@testdata/bus.jpg"   # 未配模型应返回明确"模型未配置"
+curl -s "localhost:7042/health?deep=true" -H "X-API-Key: $KEY"                            # deep 列出已懒加载引擎
+```
+
+- **count=0 也是通路验证**:bus.jpg 无车牌/无旋转目标,/license-plate、/detect/obb 返回空是正确行为,模型加载+推理+后处理链路已打通。
+- **强验证用官方 pipeline 做参照**:同一输入跑 `YOLO('xxx.onnx').predict()`,对比目标数与框坐标,两侧一致即后处理等价。合成图(手绘旋转矩形)是域外样本,官方模型同样检不出,别用它当否定证据。
+- **断言前先看结构**:`jq '.data | keys'` 确认 DTO 字段名,再写路径断言——嵌套字段(如 `.data.depth.mean`)写错路径会误判为"返回 null"。
+- **优先读服务日志**:tracing 里有布局判定打印(`OBB 输出布局: Traditional（shape=[1, 20, 8400]）`),排错比猜快。
+
+## 4. 踩坑速查
+
+| 症状 | 根因 | 处置 |
+|---|---|---|
+| `BadVersion { version_str: "1.26.0" }` | ort release-minor vs API-version 错位比较 | feature `api-27`→`api-26` |
+| OBB 报"通道数 1 < 6" | 模型是裁剪头/多输出,`run_inference` 取最后一个输出 | 换标准导出版 |
+| 换了模型文件行为不变 | OnceCell 缓存旧引擎实例 | 重启服务 |
+| curl 后台启动服务无输出 | shell 环境不持久 / 子进程脱离 | source 与启动同调用;`run_in_background` |
+| `xxd` 首字节非 0x08 | 下载到 404 页(ghproxy 失败时) | 换镜像重下 |
+| ORT 警告 shape 不匹配(图手术后) | shape inference 缓存旧值 | 无害,忽略 |
+| pip3 不存在但有 uv | Ubuntu 24.04 默认 | `uv venv` + `uv pip install --python <venv>/bin/python` |
