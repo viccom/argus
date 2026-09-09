@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vision-ext 控制台</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2129; --panel2: #212a35; --border: #2d3948;
+    --text: #d8e1ea; --muted: #8a99ab; --accent: #4da3ff; --ok: #3fb950;
+    --err: #f85149; --warn: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  header .spacer { flex: 1; }
+  header input[type="password"] {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; width: 220px; font-size: 13px;
+  }
+  main { display: flex; flex: 1; min-height: 0; }
+  /* 左:画布区 */
+  #stage { flex: 1.4; display: flex; flex-direction: column; padding: 16px; min-width: 0; }
+  #dropzone {
+    flex: 1; border: 2px dashed var(--border); border-radius: 12px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; cursor: pointer; transition: border-color .15s, background .15s;
+    min-height: 300px; position: relative; overflow: hidden;
+  }
+  #dropzone.dragover { border-color: var(--accent); background: rgba(77,163,255,.06); }
+  #dropzone.has-image { border-style: solid; padding: 8px; }
+  #dropzone .hint { color: var(--muted); font-size: 14px; text-align: center; line-height: 1.7; }
+  #dropzone .hint b { color: var(--text); }
+  #canvas { max-width: 100%; max-height: 100%; display: none; border-radius: 6px; }
+  #stage-bar { display: flex; gap: 12px; align-items: center; padding-top: 10px; font-size: 13px; color: var(--muted); }
+  /* 右:控制与结果 */
+  #side { flex: 1; display: flex; flex-direction: column; padding: 16px 16px 16px 0; min-width: 380px; max-width: 560px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .panel h2 { font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 10px; text-transform: uppercase; letter-spacing: .05em; }
+  #tasks { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 8px; }
+  .task {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 6px; text-align: center; cursor: pointer; font-size: 12.5px;
+    transition: border-color .12s, background .12s; user-select: none;
+  }
+  .task:hover { border-color: var(--accent); }
+  .task.active { border-color: var(--accent); background: rgba(77,163,255,.12); color: var(--accent); font-weight: 600; }
+  .task .ico { font-size: 18px; display: block; margin-bottom: 3px; }
+  #params { display: none; margin-top: 10px; font-size: 13px; color: var(--muted); gap: 14px; flex-wrap: wrap; }
+  #params.show { display: flex; }
+  #params label { display: flex; align-items: center; gap: 6px; }
+  #run {
+    width: 100%; padding: 11px; border: none; border-radius: 8px; cursor: pointer;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 600;
+    transition: filter .12s;
+  }
+  #run:hover { filter: brightness(1.1); }
+  #run:disabled { filter: grayscale(.6); cursor: not-allowed; }
+  /* 结果面板 */
+  #result-panel { flex: 1; overflow-y: auto; display: none; }
+  #result-panel.show { display: block; }
+  .stat-row { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .stat {
+    background: var(--panel2); border-radius: 8px; padding: 8px 14px; text-align: center; min-width: 86px;
+  }
+  .stat .v { font-size: 20px; font-weight: 700; color: var(--accent); }
+  .stat .k { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .det-list { font-size: 13px; }
+  .det-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+    border-radius: 6px; margin-bottom: 4px; background: var(--panel2);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .det-item .cls { font-weight: 600; min-width: 70px; }
+  .det-item .conf { color: var(--muted); margin-left: auto; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12.5px; }
+  .bar-row .name { width: 90px; color: var(--muted); text-align: right; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-track { flex: 1; background: var(--panel2); height: 14px; border-radius: 7px; overflow: hidden; }
+  .bar-fill { height: 100%; background: linear-gradient(90deg, #2d7dd2, #4da3ff); border-radius: 7px; }
+  .bar-row .val { width: 60px; color: var(--text); flex-shrink: 0; }
+  #msg {
+    display: none; padding: 10px 14px; border-radius: 8px; font-size: 13.5px; margin-bottom: 12px;
+  }
+  #msg.err { display: block; background: rgba(248,81,73,.12); border: 1px solid rgba(248,81,73,.4); color: #ff8b85; }
+  #msg.info { display: block; background: rgba(77,163,255,.1); border: 1px solid rgba(77,163,255,.3); color: var(--accent); }
+  #spin { display: none; }
+  #spin.show { display: inline-block; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  section { display: contents; }
+</style>
+</head>
+<body>
+<header>
+  <h1>vision<span>-ext</span> 控制台</h1>
+  <span class="legend" id="ver"></span>
+  <div class="spacer"></div>
+  <input type="password" id="apikey" placeholder="API Key(服务启用认证时填写)">
+</header>
+<main>
+  <div id="stage">
+    <div id="dropzone">
+      <div class="hint" id="dz-hint">
+        <b>拖拽图片到此处</b> 或点击选择<br>
+        支持 jpg / png / webp
+      </div>
+      <canvas id="canvas"></canvas>
+      <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
+    </div>
+    <div id="stage-bar">
+      <span id="img-meta"></span>
+      <span id="spin">⏳ 处理中…</span>
+    </div>
+  </div>
+  <div id="side">
+    <div class="panel">
+      <h2>处理方式</h2>
+      <div id="tasks"></div>
+      <div id="params"></div>
+    </div>
+    <button id="run" disabled>运行</button>
+    <div style="height:14px"></div>
+    <div id="result-panel" class="panel">
+      <h2>结果</h2>
+      <div id="msg"></div>
+      <div id="result-body"></div>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+
+// ---- 任务定义(与后端端点一一对应) ----
+const TASKS = [
+  { id: "detect",       name: "目标检测",  ico: "📦", path: "/detect",           kind: "boxes" },
+  { id: "obb",          name: "旋转框检测", ico: "🛩", path: "/detect/obb",      kind: "obb" },
+  { id: "face_det",     name: "人脸检测",  ico: "🙂", path: "/face/detect",      kind: "face" },
+  { id: "face_rec",     name: "人脸识别",  ico: "🧑‍💼", path: "/face/recognize",  kind: "faceRec" },
+  { id: "ocr",          name: "文字识别",  ico: "🔤", path: "/ocr",              kind: "ocr" },
+  { id: "plate",        name: "车牌识别",  ico: "🚗", path: "/license-plate",    kind: "boxes" },
+  { id: "qr",           name: "二维码检测", ico: "🔳", path: "/qr",              kind: "qr" },
+  { id: "quality",      name: "质量评估",  ico: "🎚", path: "/quality",          kind: "quality" },
+  { id: "pose",         name: "姿态估计",  ico: "🧍", path: "/pose",             kind: "pose" },
+  { id: "depth",        name: "深度估计",  ico: "🏔", path: "/depth",            kind: "depth" },
+  { id: "parsing",      name: "人体解析",  ico: "👕", path: "/human-parsing",    kind: "parsing" },
+];
+const PALETTE = ["#4da3ff","#f0883e","#3fb950","#d29922","#f85149","#bc8cff","#39c5cf","#ff7b72","#7ee787","#ffa657","#d2a8ff","#79c0ff"];
+// COCO 17 关键点骨架连线
+const SKELETON = [[0,1],[0,2],[1,3],[2,4],[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]];
+
+let currentTask = null;
+let srcImage = null;       // 原始 Image 对象
+let displayScale = 1;      // 图像坐标 → canvas 显示坐标
+let resultSnapshot = null; // 最近一次结果(重绘用)
+
+const $ = id => document.getElementById(id);
+const dz = $("dropzone"), canvas = $("canvas"), ctx = canvas.getContext("2d");
+
+// ---- 任务选择 ----
+const tasksEl = $("tasks");
+TASKS.forEach(t => {
+  const el = document.createElement("div");
+  el.className = "task";
+  el.innerHTML = `<span class="ico">${t.ico}</span>${t.name}`;
+  el.onclick = () => selectTask(t, el);
+  el.dataset.id = t.id;
+  tasksEl.appendChild(el);
+});
+
+function selectTask(t, el) {
+  currentTask = t;
+  document.querySelectorAll(".task").forEach(x => x.classList.remove("active"));
+  el.classList.add("active");
+  $("run").disabled = !srcImage;
+  renderParams(t);
+  // 切换任务时若有旧结果,重绘原图
+  if (srcImage) { resultSnapshot = null; drawBase(); }
+}
+
+function renderParams(t) {
+  const p = $("params");
+  p.innerHTML = "";
+  p.classList.remove("show");
+  if (t.id === "detect") {
+    p.innerHTML = `<label><input type="checkbox" id="p-sahi"> SAHI 切片(小目标增强)</label>`;
+    p.classList.add("show");
+  } else if (t.id === "face_rec") {
+    p.innerHTML = `<label>匹配阈值 <input type="number" id="p-threshold" value="0.5" step="0.05" min="0" max="1" style="width:64px"></label>`;
+    p.classList.add("show");
+  }
+}
+
+// ---- 图片载入(拖拽 + 点击) ----
+dz.addEventListener("click", () => $("file-input").click());
+$("file-input").addEventListener("change", e => { if (e.target.files[0]) loadImage(e.target.files[0]); });
+dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("dragover"); });
+dz.addEventListener("dragleave", () => dz.classList.remove("dragover"));
+dz.addEventListener("drop", e => {
+  e.preventDefault(); dz.classList.remove("dragover");
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith("image/")) loadImage(f);
+});
+
+function loadImage(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    srcImage = img;
+    $("img-meta").textContent = `${file.name} · ${img.naturalWidth}×${img.naturalHeight}`;
+    $("dz-hint").style.display = "none";
+    dz.classList.add("has-image");
+    canvas.style.display = "block";
+    resultSnapshot = null;
+    drawBase();
+    $("run").disabled = !currentTask;
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+
+function drawBase() {
+  const maxW = dz.clientWidth - 16, maxH = dz.clientHeight - 16;
+  displayScale = Math.min(maxW / srcImage.naturalWidth, maxH / srcImage.naturalHeight, 1);
+  canvas.width = Math.round(srcImage.naturalWidth * displayScale);
+  canvas.height = Math.round(srcImage.naturalHeight * displayScale);
+  ctx.drawImage(srcImage, 0, 0, canvas.width, canvas.height);
+}
+
+window.addEventListener("resize", () => {
+  if (!srcImage) return;
+  drawBase();
+  if (resultSnapshot) renderResult(resultSnapshot, true);
+});
+
+// ---- 坐标启发式:全部值 ≤1.5 且图像 >100px 视为归一化坐标 ----
+function isNormalized(values) {
+  if (!srcImage || srcImage.naturalWidth < 100) return false;
+  return values.every(v => Math.abs(v) <= 1.5);
+}
+const px = v => v * displayScale;
+
+// ---- 运行 ----
+$("run").addEventListener("click", run);
+
+async function run() {
+  if (!srcImage || !currentTask) return;
+  $("run").disabled = true;
+  $("spin").classList.add("show");
+  hideMsg();
+  try {
+    // canvas 导出原图尺寸副本,避免显示缩放影响上传质量
+    const off = document.createElement("canvas");
+    off.width = srcImage.naturalWidth; off.height = srcImage.naturalHeight;
+    off.getContext("2d").drawImage(srcImage, 0, 0);
+    const blob = await new Promise(r => off.toBlob(r, "image/jpeg", 0.95));
+
+    const fd = new FormData();
+    fd.append("file", blob, "image.jpg");
+    if (currentTask.id === "detect" && $("p-sahi")?.checked) fd.append("sahi", "true");
+    if (currentTask.id === "face_rec" && $("p-threshold")?.value) fd.append("threshold", $("p-threshold").value);
+
+    const headers = {};
+    const key = $("apikey").value.trim();
+    if (key) headers["X-API-Key"] = key;
+
+    const t0 = performance.now();
+    const resp = await fetch(currentTask.path, { method: "POST", headers, body: fd });
+    const netMs = Math.round(performance.now() - t0);
+    const json = await resp.json();
+    if (json.status !== "ok") throw new Error(json.data?.error || `HTTP ${resp.status}`);
+    resultSnapshot = { task: currentTask, data: json.data, netMs };
+    renderResult(resultSnapshot, false);
+  } catch (err) {
+    showMsg(`处理失败:${err.message}`, "err");
+  } finally {
+    $("run").disabled = false;
+    $("spin").classList.remove("show");
+  }
+}
+
+// ---- 结果渲染 ----
+function renderResult(snap, redrawOnly) {
+  const { task, data, netMs } = snap;
+  drawBase(); // 先重绘底图
+  const body = $("result-body");
+  $("result-panel").classList.add("show");
+  body.innerHTML = "";
+
+  const stats = [`<div class="stat"><div class="v">${data.inference_ms ?? "-"}</div><div class="k">推理 ms</div></div>`];
+  if (netMs !== undefined) stats.push(`<div class="stat"><div class="v">${netMs}</div><div class="k">往返 ms</div></div>`);
+  if (data.count !== undefined) stats.push(`<div class="stat"><div class="v">${data.count}</div><div class="k">数量</div></div>`);
+  if (data.sahi_slices !== undefined) stats.push(`<div class="stat"><div class="v">${data.sahi_slices}</div><div class="k">切片数</div></div>`);
+
+  switch (task.kind) {
+    case "boxes": drawBoxes(data.detections || [], false); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class ?? d.text ?? "?", d.confidence ?? d.score)); break;
+    case "obb":   drawObb(data.detections || []); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class, d.confidence)); break;
+    case "face":  drawFaces(data.faces || []); body.append(statsBlock(stats), listBlock(data.faces || [], () => "人脸", f => f.confidence)); break;
+    case "faceRec": drawFaceRec(data.matches || [], data.embeddings || []); body.append(statsBlock(stats), faceRecBlock(data)); break;
+    case "ocr":   drawOcr(data.regions || []); body.append(statsBlock(stats), ocrBlock(data)); break;
+    case "qr":    drawQr(data.detections || []); body.append(statsBlock(stats), listBlock(data.detections || [], () => "二维码", d => d.score)); break;
+    case "quality": body.append(statsBlock(stats), qualityBlock(data.quality)); break;
+    case "pose":  drawPoses(data.poses || []); body.append(statsBlock(stats), listBlock(data.poses || [], () => "人体", p => p.confidence)); break;
+    case "depth": drawDepth(data.depth); body.append(statsBlock(stats), depthStats(data.depth)); break;
+    case "parsing": body.append(statsBlock(stats), parsingBlock(data.parsing)); break;
+  }
+}
+
+function statsBlock(stats) {
+  const d = document.createElement("div"); d.className = "stat-row"; d.innerHTML = stats.join(""); return d;
+}
+
+function listBlock(items, nameFn, confFn) {
+  const d = document.createElement("div"); d.className = "det-list";
+  if (!items.length) { d.innerHTML = `<div class="legend">未检出目标</div>`; return d; }
+  items.forEach((it, i) => {
+    const row = document.createElement("div"); row.className = "det-item";
+    const conf = confFn(it);
+    row.innerHTML = `<span class="dot" style="background:${PALETTE[i % PALETTE.length]}"></span>
+      <span class="cls">${esc(nameFn(it))}</span>
+      <span class="conf">${conf != null ? (conf * 100).toFixed(1) + "%" : ""}</span>`;
+    d.appendChild(row);
+  });
+  return d;
+}
+
+function ocrBlock(data) {
+  const d = document.createElement("div");
+  d.innerHTML = `<div class="det-list" style="margin-bottom:10px">${
+    (data.regions || []).map((r, i) =>
+      `<div class="det-item"><span class="dot" style="background:${PALETTE[i % PALETTE.length]}"></span>
+       <span class="cls">${esc(r.text)}</span><span class="conf">${(r.text_score * 100).toFixed(0)}%</span></div>`).join("")
+    || '<div class="legend">未识别到文字</div>'}</div>
+    <div class="legend">全文:${esc(data.text || "(空)")}</div>`;
+  return d;
+}
+
+function qualityBlock(q) {
+  const rows = [["综合", q.overall], ["清晰度", q.blur_score], ["亮度", q.brightness], ["对比度", q.contrast], ["噪声", q.noise]];
+  return barsBlock(rows);
+}
+
+function depthStats(depth) {
+  return barsBlock([["最小", depth.min], ["最大", depth.max], ["平均", depth.mean]]);
+}
+
+function parsingBlock(p) {
+  return barsBlock((p.parts || []).map(x => [x.name, x.ratio]));
+}
+
+function barsBlock(rows) {
+  const d = document.createElement("div");
+  const max = Math.max(...rows.map(r => Math.abs(r[1])), 1e-9);
+  d.innerHTML = rows.map(([name, val]) =>
+    `<div class="bar-row"><span class="name">${esc(String(name))}</span>
+     <div class="bar-track"><div class="bar-fill" style="width:${(Math.abs(val) / max * 100).toFixed(1)}%"></div></div>
+     <span class="val">${fmt(val)}</span></div>`).join("");
+  return d;
+}
+
+function faceRecBlock(data) {
+  const d = document.createElement("div"); d.className = "det-list";
+  (data.matches || []).forEach((m, i) => {
+    const row = document.createElement("div"); row.className = "det-item";
+    row.innerHTML = `<span class="dot" style="background:${m.label ? "#3fb950" : "#8a99ab"}"></span>
+      <span class="cls">${m.label ? esc(m.label) : "未知"}</span>
+      <span class="conf">${(m.similarity * 100).toFixed(1)}%</span>`;
+    d.appendChild(row);
+  });
+  if (!data.matches?.length) d.innerHTML = '<div class="legend">未检出人脸</div>';
+  const dim = data.embeddings?.[0]?.length;
+  if (dim) { const l = document.createElement("div"); l.className = "legend"; l.textContent = `嵌入维度:${dim}(未提供比对库,可用于注册)`; d.appendChild(l); }
+  return d;
+}
+
+// ---- Canvas 标注绘制 ----
+function boxStroke(i) {
+  ctx.lineWidth = 2; ctx.strokeStyle = PALETTE[i % PALETTE.length];
+  ctx.shadowColor = "rgba(0,0,0,.7)"; ctx.shadowBlur = 3;
+}
+function label(text, x, y, color) {
+  ctx.shadowBlur = 0;
+  ctx.font = "12px sans-serif";
+  const w = ctx.measureText(text).width + 8;
+  ctx.fillStyle = color;
+  ctx.fillRect(x, Math.max(0, y - 16), w, 16);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(text, x + 4, Math.max(11, y - 4));
+}
+
+function drawBoxes(dets) {
+  dets.forEach((d, i) => {
+    let [x1, y1, x2, y2] = d.bbox;
+    let w = srcImage.naturalWidth, h = srcImage.naturalHeight;
+    if (isNormalized(d.bbox)) { x1 *= w; x2 *= w; y1 *= h; y2 *= h; }
+    boxStroke(i);
+    ctx.strokeRect(px(x1), px(y1), px(x2 - x1), px(y2 - y1));
+    label(`${d.class ?? d.text ?? ""} ${(100 * (d.confidence ?? d.score ?? 0)).toFixed(0)}%`, px(x1), px(y1), PALETTE[i % PALETTE.length]);
+  });
+}
+
+function drawObb(dets) {
+  const w = srcImage.naturalWidth, h = srcImage.naturalHeight;
+  dets.forEach((d, i) => {
+    const norm = isNormalized(d.corners.flat());
+    const toPx = p => norm ? [p[0] * w, p[1] * h] : p;
+    boxStroke(i);
+    ctx.beginPath();
+    d.corners.forEach((p, j) => {
+      const [X, Y] = toPx(p).map(px);
+      j === 0 ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y);
+    });
+    ctx.closePath(); ctx.stroke();
+    const [cx0, cy0] = toPx(d.corners[0]).map(px);
+    label(`${d.class} ${(100 * d.confidence).toFixed(0)}%`, cx0, cy0, PALETTE[i % PALETTE.length]);
+  });
+}
+
+function drawFaces(faces) {
+  faces.forEach((f, i) => {
+    const [x1, y1, x2, y2] = f.bbox;
+    boxStroke(i);
+    ctx.strokeRect(px(x1), px(y1), px(x2 - x1), px(y2 - y1));
+    label(`${(100 * f.confidence).toFixed(0)}%`, px(x1), px(y1), PALETTE[i % PALETTE.length]);
+    ctx.fillStyle = "#4da3ff";
+    (f.landmarks || []).forEach(k => {
+      ctx.beginPath(); ctx.arc(px(k.x), px(k.y), 2, 0, Math.PI * 2); ctx.fill();
+    });
+  });
+}
+
+function drawFaceRec(matches) {
+  matches.forEach((m, i) => {
+    const [x1, y1, x2, y2] = m.bbox;
+    const color = m.label ? "#3fb950" : "#8a99ab";
+    ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.shadowBlur = 0;
+    ctx.strokeRect(px(x1), px(y1), px(x2 - x1), px(y2 - y1));
+    label(m.label ? `${m.label} ${(100 * m.similarity).toFixed(0)}%` : "未知", px(x1), px(y1), color);
+  });
+}
+
+function drawOcr(regions) {
+  regions.forEach((r, i) => {
+    boxStroke(i);
+    ctx.beginPath();
+    r.quad.forEach((p, j) => j === 0 ? ctx.moveTo(px(p[0]), px(p[1])) : ctx.lineTo(px(p[0]), px(p[1])));
+    ctx.closePath(); ctx.stroke();
+    const t = `${r.text} ${(100 * r.text_score).toFixed(0)}%`;
+    label(t, px(r.quad[0][0]), px(r.quad[0][1]), PALETTE[i % PALETTE.length]);
+  });
+}
+
+function drawQr(dets) {
+  dets.forEach((d, i) => {
+    boxStroke(i);
+    ctx.strokeRect(px(d.x), px(d.y), px(d.w), px(d.h));
+    label(`QR ${(100 * d.score).toFixed(0)}%`, px(d.x), px(d.y), PALETTE[i % PALETTE.length]);
+  });
+}
+
+function drawPoses(poses) {
+  poses.forEach(p => {
+    const [x1, y1, x2, y2] = p.bbox;
+    ctx.lineWidth = 2; ctx.strokeStyle = "rgba(77,163,255,.7)"; ctx.shadowBlur = 0;
+    ctx.strokeRect(px(x1), px(y1), px(x2 - x1), px(y2 - y1));
+    // 骨架
+    ctx.strokeStyle = "#4da3ff"; ctx.lineWidth = 2;
+    SKELETON.forEach(([a, b]) => {
+      const ka = p.keypoints[a], kb = p.keypoints[b];
+      if (ka && kb && ka.score > 0.3 && kb.score > 0.3) {
+        ctx.beginPath(); ctx.moveTo(px(ka.x), px(ka.y)); ctx.lineTo(px(kb.x), px(kb.y)); ctx.stroke();
+      }
+    });
+    // 关键点
+    p.keypoints.forEach(k => {
+      if (k.score <= 0.3) return;
+      ctx.fillStyle = k.name === "nose" ? "#f0883e" : "#3fb950";
+      ctx.beginPath(); ctx.arc(px(k.x), px(k.y), 3, 0, Math.PI * 2); ctx.fill();
+    });
+  });
+}
+
+function drawDepth(depth) {
+  // preview 为最多 64×64 的行优先深度值,渲染为灰度热图覆盖在图上(半透明)
+  const pv = depth.preview, cols = Math.ceil(Math.sqrt(pv.length));
+  const rows = Math.ceil(pv.length / cols);
+  const tmp = document.createElement("canvas");
+  tmp.width = cols; tmp.height = rows;
+  const tctx = tmp.getContext("2d");
+  const img = tctx.createImageData(cols, rows);
+  const range = depth.max - depth.min || 1;
+  for (let i = 0; i < pv.length; i++) {
+    const g = Math.round(((pv[i] - depth.min) / range) * 255);
+    img.data[i * 4] = g; img.data[i * 4 + 1] = g; img.data[i * 4 + 2] = g; img.data[i * 4 + 3] = 255;
+  }
+  tctx.putImageData(img, 0, 0);
+  ctx.globalAlpha = 0.85;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(tmp, 0, 0, canvas.width, canvas.height);
+  ctx.globalAlpha = 1;
+}
+
+// ---- 杂项 ----
+function showMsg(text, cls) { const m = $("msg"); m.textContent = text; m.className = cls; }
+function hideMsg() { $("msg").className = ""; }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function fmt(v) { return typeof v === "number" ? (Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(3)) : v; }
+
+// 版本信息(同源 /health)
+fetch("/health").then(r => r.json()).then(j => { $("ver").textContent = j.version || ""; }).catch(() => {});
+</script>
+</body>
+</html>
