@@ -1,0 +1,34 @@
+[package]
+name = "vision-ext"
+version = "0.1.0"
+edition = "2021"
+description = "工业视觉智能 HTTP 服务（基于 rust-onnx-infer）"
+license = "MIT"
+
+[features]
+cuda = ["rust-onnx-infer/cuda"]
+
+[dependencies]
+rust-onnx-infer = { path = "../rust-onnx-infer", default-features = false, features = ["load-dynamic"] }
+axum = { version = "0.8", features = ["multipart", "tokio"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "request-id"] }
+image = { version = "0.25", features = ["jpeg", "png", "webp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[lints.clippy]
+all = { level = "deny", priority = 10 }
+perf = { level = "deny", priority = 9 }
