@@ -16,6 +16,11 @@ pub async fn auth_middleware(
     req: Request,
     next: Next,
 ) -> Response {
+    // 控制台静态页面豁免:浏览器加载页面本身无法携带自定义 header;
+    // 页面发起的 API 调用仍走下方认证(页面提供 API key 输入框)。
+    if req.uri().path() == "/ui" {
+        return next.run(req).await;
+    }
     if let Some(ref expected) = token {
         let provided = extract_api_key(&req);
         match provided {

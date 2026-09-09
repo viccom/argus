@@ -18,6 +18,7 @@
 | `POST /depth` | 单目深度估计（min/max/mean + 64×64 预览） | Depth Anything V2 |
 | `POST /human-parsing` | 人体解析（部件占比） | PP-HumanSeg |
 | `GET /health?deep=true` | 健康检查（浅检返回已加载引擎；deep=true 额外返回已配置能力清单） | — |
+| `GET /ui` | 内嵌 Web 控制台：浏览器拖拽图片、选择处理方式、可视化标注结果（页面免认证加载，API 调用仍需 key） | — |
 
 所有模型按需懒加载（`tokio::OnceCell`），推理经 `spawn_blocking` + 信号量背压。
 
@@ -50,7 +51,7 @@ cargo build --release --jobs 6
 
 | 文件 | 来源 |
 |---|---|
-| `yolov8n.onnx` | [yolo-rs release](https://github.com/klemen-002/yolo-rs/releases) 或 Ultralytics 导出 |
+| `yolov8n.onnx` | Ultralytics 导出：`YOLO('yolov8n.pt').export(format='onnx', imgsz=640)`。**勿用 Xenova/yolo-rs release 变体**——其检测头输出归一化坐标（0~1）且无类名元数据，与解码器（按 640 像素空间 letterbox 反算）不兼容，表现为 bbox 零宽/SAHI 全丢弃 |
 | `yolov8n-obb.onnx` | Ultralytics 导出：`YOLO('yolov8n-obb.pt').export(format='onnx', imgsz=640)` |
 | `yolov8n-pose.onnx` | [Xenova/yolov8n-pose](https://huggingface.co/Xenova/yolov8n-pose)（`onnx/model.onnx`） |
 | `face_detection_yunet_2023mar.onnx` | [opencv/face_detection_yunet](https://huggingface.co/opencv/face_detection_yunet) |

@@ -99,6 +99,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
     axum::Router::new()
         .route("/", get(service_info))
         .route("/health", get(health))
+        .route("/ui", get(crate::routes::ui::ui))
         .route("/detect", post(crate::routes::detection::detect))
         .route("/detect/obb", post(crate::routes::detection::detect_obb))
         .route("/face/detect", post(crate::routes::face::face_detect))
@@ -142,7 +143,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     fn test_state() -> AppState {
@@ -236,6 +237,26 @@ mod tests {
             !text.contains("confidence"),
             "service_info 不应宣传未生效的 confidence 参数: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn ui_should_serve_html_even_when_auth_configured() {
+        // 浏览器无法为页面加载本身携带 API key,控制台页面须豁免鉴权;
+        // 页面内的 API 调用仍需 key(页面提供输入框)
+        let app = build_router(test_state(), Some(Arc::new("secret".into())));
+        let resp = app
+            .oneshot(Request::get("/ui").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "/ui 应可访问");
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(ct.contains("text/html"), "应为 HTML: {ct}");
+        let text = body_text(resp).await;
+        assert!(text.contains("vision-ext"), "页面应含服务标识: {text}");
     }
 
     #[tokio::test]

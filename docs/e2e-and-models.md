@@ -119,3 +119,4 @@ curl -s "localhost:7042/health?deep=true" -H "X-API-Key: $KEY"                  
 | `xxd` 首字节非 0x08 | 下载到 404 页(ghproxy 失败时) | 换镜像重下 |
 | ORT 警告 shape 不匹配(图手术后) | shape inference 缓存旧值 | 无害,忽略 |
 | pip3 不存在但有 uv | Ubuntu 24.04 默认 | `uv venv` + `uv pip install --python <venv>/bin/python` |
+| `/detect` bbox 零宽(x≈0)、类名是数字、SAHI count=0 | 模型是 Xenova/yolo-rs 变体:检测头输出**归一化坐标**(cx∈[0,1]),解码器按 640 像素约定反算即崩塌;类名元数据缺失 | `YOLO('yolov8n.pt').export(format='onnx', imgsz=640)` 重导出标准版(判别法:python 直跑输出看 cx 值域 0~1 vs 0~640) |
