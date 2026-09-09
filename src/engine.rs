@@ -8,7 +8,6 @@ use rust_onnx_infer::engines::detection::DetectionEngine;
 use rust_onnx_infer::engines::face_detection::FaceDetectResult;
 use rust_onnx_infer::engines::face_recognition::FaceRecognitionEngine;
 use rust_onnx_infer::engines::human_parsing::HumanParsingEngine;
-use rust_onnx_infer::engines::image_quality::ImageQualityEngine;
 use rust_onnx_infer::engines::license_plate::LicensePlateEngine;
 use rust_onnx_infer::engines::obb_detection::ObbDetectionEngine;
 use rust_onnx_infer::engines::ocr::OcrPipeline;
@@ -32,7 +31,6 @@ type DynDepth = Box<dyn OnnxInferenceEngine<Output = FloatMask>>;
 ///
 /// detection 存储为具体类型 `DetectionEngine`（非 trait object），
 /// 因为 SAHI 切片推理需要 `&dyn SahiSinglePredictor`——该 trait 仅具体类型实现。
-#[allow(dead_code)]
 pub struct EngineManager {
     config: Config,
     device: DeviceType,
@@ -43,13 +41,11 @@ pub struct EngineManager {
     ocr: tokio::sync::OnceCell<Arc<OcrPipeline>>,
     plate: tokio::sync::OnceCell<Arc<LicensePlateEngine>>,
     qr: tokio::sync::OnceCell<Arc<QrDetector>>,
-    quality: tokio::sync::OnceCell<Arc<ImageQualityEngine>>,
     pose: tokio::sync::OnceCell<Arc<DynPose>>,
     depth: tokio::sync::OnceCell<Arc<DynDepth>>,
     human_parsing: tokio::sync::OnceCell<Arc<HumanParsingEngine>>,
 }
 
-#[allow(dead_code)]
 impl EngineManager {
     pub fn new(config: Config) -> Self {
         let device = DeviceType::from_name(&config.device);
@@ -63,19 +59,10 @@ impl EngineManager {
             ocr: tokio::sync::OnceCell::new(),
             plate: tokio::sync::OnceCell::new(),
             qr: tokio::sync::OnceCell::new(),
-            quality: tokio::sync::OnceCell::new(),
             pose: tokio::sync::OnceCell::new(),
             depth: tokio::sync::OnceCell::new(),
             human_parsing: tokio::sync::OnceCell::new(),
         }
-    }
-
-    pub fn device_type(&self) -> DeviceType {
-        self.device
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
     }
 
     /// 列出已加载的引擎名。
@@ -88,7 +75,6 @@ impl EngineManager {
         if self.ocr.initialized() { loaded.push("ocr"); }
         if self.plate.initialized() { loaded.push("license_plate"); }
         if self.qr.initialized() { loaded.push("qr"); }
-        if self.quality.initialized() { loaded.push("quality"); }
         if self.pose.initialized() { loaded.push("pose"); }
         if self.depth.initialized() { loaded.push("depth"); }
         if self.human_parsing.initialized() { loaded.push("human_parsing"); }
@@ -102,12 +88,15 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.detection_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("detection".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || {
                     DetectionEngine::for_yolo(&path, device, 0.25, 0.45)
                 })
                 .await
                 .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 detection 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -119,10 +108,13 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.obb_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("obb".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || ObbDetectionEngine::new(&path, device))
                     .await
                     .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 obb 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -134,12 +126,15 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.face_det_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("face_detection".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || {
                     create_face_detection_engine(&path, device)
                 })
                 .await
                 .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 face_detection 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -151,12 +146,15 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.face_rec_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("face_recognition".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || {
                     create_face_recognition_engine(&path, device)
                 })
                 .await
                 .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 face_recognition 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -172,12 +170,15 @@ impl EngineManager {
                     .ok_or_else(|| AppError::ModelNotConfigured("ocr".into()))?;
                 let dict = self.config.ocr_dict.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("ocr".into()))?;
+                let model_display = format!("{} + {}", det.display(), rec.display());
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || {
                     create_ocr_pipeline(&det, &rec, &dict, device)
                 })
                 .await
                 .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 ocr 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -191,12 +192,15 @@ impl EngineManager {
                     .ok_or_else(|| AppError::ModelNotConfigured("license_plate".into()))?;
                 let rec = self.config.plate_rec_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("license_plate".into()))?;
+                let model_display = format!("{} + {}", det.display(), rec.display());
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || {
                     LicensePlateEngine::new(&det, &rec, device)
                 })
                 .await
                 .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 license_plate 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -208,27 +212,13 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.qr_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("qr".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || QrDetector::new(&path, device))
                     .await
                     .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
-                Ok(Arc::new(engine))
-            })
-            .await
-            .cloned()
-    }
-
-    pub async fn quality(&self) -> Result<Arc<ImageQualityEngine>, AppError> {
-        self.quality
-            .get_or_try_init(|| async {
-                let path = self.config.quality_model.clone()
-                    .ok_or_else(|| AppError::ModelNotConfigured("quality".into()))?;
-                let device = self.device;
-                let engine = tokio::task::spawn_blocking(move || {
-                    ImageQualityEngine::new(&path, device)
-                })
-                .await
-                .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 qr 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -240,12 +230,15 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.pose_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("pose".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || {
                     create_pose_engine(&path, device, 0.25)
                 })
                 .await
                 .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 pose 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -257,10 +250,13 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.depth_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("depth".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || create_depth_engine(&path, device))
                     .await
                     .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 depth 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -272,12 +268,15 @@ impl EngineManager {
             .get_or_try_init(|| async {
                 let path = self.config.human_parsing_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("human_parsing".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
                 let device = self.device;
                 let engine = tokio::task::spawn_blocking(move || {
                     HumanParsingEngine::new(&path, device)
                 })
                 .await
                 .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                tracing::info!("引擎 human_parsing 加载完成: {} ({:?})", model_display, t0.elapsed());
                 Ok(Arc::new(engine))
             })
             .await
@@ -301,36 +300,6 @@ where
 mod tests {
     use super::*;
     use crate::config::Config;
-
-    #[test]
-    fn device_type_from_config_cpu() {
-        let config = Config {
-            device: "cpu".into(),
-            ..Default::default()
-        };
-        let mgr = EngineManager::new(config);
-        assert_eq!(mgr.device_type(), DeviceType::Cpu);
-    }
-
-    #[test]
-    fn device_type_from_config_cuda() {
-        let config = Config {
-            device: "cuda".into(),
-            ..Default::default()
-        };
-        let mgr = EngineManager::new(config);
-        assert_eq!(mgr.device_type(), DeviceType::Cuda);
-    }
-
-    #[test]
-    fn device_type_from_config_unknown_falls_back_to_cpu() {
-        let config = Config {
-            device: "tpu".into(),
-            ..Default::default()
-        };
-        let mgr = EngineManager::new(config);
-        assert_eq!(mgr.device_type(), DeviceType::Cpu);
-    }
 
     #[tokio::test]
     async fn get_detection_engine_should_error_when_not_configured() {

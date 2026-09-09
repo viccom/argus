@@ -231,13 +231,14 @@ pub async fn quality(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     // QualityAssessor 为纯算法评估器，不加载 ONNX 模型；CPU 密集但轻量，
     // 仍走 spawn_blocking 避免阻塞 runtime。
     let t0 = std::time::Instant::now();
     let report = crate::engine::run_blocking(move || QualityAssessor::new().assess(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
+    tracing::info!(endpoint = "quality", inference_ms = elapsed as u64, "质量评估完成");
 
     let dto = QualityDto::from(&report);
 
@@ -256,7 +257,7 @@ pub async fn pose(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.pose().await?;
     let _permit = acquire_permit(&state).await?;
@@ -267,6 +268,7 @@ pub async fn pose(
 
     let dtos: Vec<PoseDto> = results.iter().map(PoseDto::from).collect();
     let count = dtos.len();
+    tracing::info!(endpoint = "pose", count, inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",
@@ -284,7 +286,7 @@ pub async fn depth(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.depth().await?;
     let _permit = acquire_permit(&state).await?;
@@ -294,6 +296,7 @@ pub async fn depth(
     let elapsed = t0.elapsed().as_millis();
 
     let dto = DepthDto::from(&mask);
+    tracing::info!(endpoint = "depth", inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",
@@ -310,7 +313,7 @@ pub async fn human_parsing(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.human_parsing().await?;
     let _permit = acquire_permit(&state).await?;
@@ -320,6 +323,7 @@ pub async fn human_parsing(
     let elapsed = t0.elapsed().as_millis();
 
     let dto = HumanParsingDto::from(&map);
+    tracing::info!(endpoint = "human_parsing", inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",

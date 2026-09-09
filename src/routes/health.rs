@@ -36,23 +36,32 @@ impl AppState {
     }
 }
 
-/// /health 查询参数。deep=true 时列出已加载引擎状态。
+/// /health 查询参数。deep=true 时额外返回 configured（已配置模型的能力清单）。
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct HealthQuery {
     pub deep: Option<bool>,
 }
 
 /// GET /health[?deep=true]
-pub async fn health(State(state): State<AppState>, Query(_query): Query<HealthQuery>) -> Json<Value> {
+///
+/// 浅检返回已加载引擎（`engines`）；deep=true 追加 `configured`（配置了模型路径的
+/// 能力清单），两者对照可见"配置了未加载"的引擎。
+pub async fn health(
+    State(state): State<AppState>,
+    Query(query): Query<HealthQuery>,
+) -> Json<Value> {
     let engines = state.engines.list_loaded();
-    Json(json!({
+    let mut body = json!({
         "status": "healthy",
         "device": state.config.device,
         "engines": engines,
         "version": crate::version::version_string(),
         "uptime_s": state.started_at.elapsed().as_secs(),
-    }))
+    });
+    if query.deep.unwrap_or(false) {
+        body["configured"] = json!(state.config.configured_engines());
+    }
+    Json(body)
 }
 
 /// GET / — 服务信息端点：服务名、版本、端点列表。
@@ -63,7 +72,7 @@ pub async fn service_info(State(state): State<AppState>) -> Json<Value> {
         "uptime_s": state.started_at.elapsed().as_secs(),
         "endpoints": {
             "GET /health": "健康检查",
-            "POST /detect": "目标检测（multipart: file/confidence/sahi/slice_w/slice_h/overlap）",
+            "POST /detect": "目标检测（multipart: file/sahi/slice_w/slice_h/overlap）",
             "POST /detect/obb": "OBB 旋转框检测（multipart: file）",
             "POST /face/detect": "人脸检测（multipart: file）",
             "POST /face/recognize": "人脸识别（multipart: file/known_embeddings）",
@@ -116,6 +125,13 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
                 method = %req.method(),
                 uri = %req.uri(),
             )
+        })
+        .on_response(|resp: &axum::http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
+            tracing::info!(
+                status = resp.status().as_u16(),
+                latency_ms = latency.as_millis() as u64,
+                "请求完成"
+            );
         }))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -176,6 +192,50 @@ mod tests {
             .unwrap();
         let text = body_text(resp).await;
         assert!(text.contains("engines"), "应含 engines 字段: {text}");
+    }
+
+    #[tokio::test]
+    async fn health_deep_should_list_configured_engines() {
+        let config = Config {
+            detection_model: Some(std::path::PathBuf::from("/models/yolov8n.onnx")),
+            ..Default::default()
+        };
+        let mgr = EngineManager::new(config.clone());
+        let app = build_router(AppState::new(config, mgr), None);
+        let resp = app
+            .oneshot(Request::get("/health?deep=true").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let text = body_text(resp).await;
+        assert!(text.contains("configured"), "deep 检应含 configured 字段: {text}");
+        assert!(text.contains("detection"), "configured 应列出已配置的 detection: {text}");
+    }
+
+    #[tokio::test]
+    async fn health_shallow_should_not_include_configured() {
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let text = body_text(resp).await;
+        assert!(!text.contains("configured"), "浅检不应含 configured 字段: {text}");
+    }
+
+    #[tokio::test]
+    async fn service_info_should_not_advertise_unsupported_confidence_param() {
+        // confidence 参数被解析但从未传入引擎（阈值在引擎构造时固定），
+        // 接口描述不应宣传未生效的参数
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let text = body_text(resp).await;
+        assert!(
+            !text.contains("confidence"),
+            "service_info 不应宣传未生效的 confidence 参数: {text}"
+        );
     }
 
     #[tokio::test]

@@ -29,8 +29,15 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        if matches!(self, AppError::Overload(_)) {
-            tracing::warn!("请求被背压拒绝: {}", self.to_string());
+        // 服务错误统一返回 HTTP 200（信封语义），TraceLayer 按状态码分级失效，
+        // 因此必须在响应构造处主动落日志，否则生产环境无失败痕迹可查。
+        match &self {
+            // 客户端输入问题：量可能大且非服务故障，降为 debug 不刷屏
+            AppError::BadRequest(_) => tracing::debug!("{}", self.to_string()),
+            // 背压拒绝属预期内的过载信号
+            AppError::Overload(_) => tracing::warn!("请求被背压拒绝: {}", self.to_string()),
+            // 服务侧故障（模型未配置/推理失败/图像异常/内部错误）必须留痕
+            _ => tracing::error!("请求处理失败: {}", self.to_string()),
         }
         let body = json!({
             "status": "error",

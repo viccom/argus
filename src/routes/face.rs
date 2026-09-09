@@ -186,7 +186,7 @@ pub async fn face_detect(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_face_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.face_detection().await?;
     let _permit = acquire_permit(&state).await?;
@@ -197,6 +197,7 @@ pub async fn face_detect(
 
     let dtos: Vec<FaceDetectDto> = faces.iter().map(FaceDetectDto::from).collect();
     let count = dtos.len();
+    tracing::info!(endpoint = "face_detect", count, inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",
@@ -217,7 +218,7 @@ pub async fn face_recognize(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_recognize_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let det_engine = state.engines.face_detection().await?;
     let rec_engine = state.engines.face_recognition().await?;
@@ -267,6 +268,7 @@ pub async fn face_recognize(
         });
     }
     let elapsed = t0.elapsed().as_millis();
+    tracing::info!(endpoint = "face_recognize", count = matches.len(), inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",

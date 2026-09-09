@@ -30,8 +30,6 @@ pub struct Config {
     pub plate_rec_model: Option<PathBuf>,
     /// 二维码检测模型路径。
     pub qr_model: Option<PathBuf>,
-    /// 图像质量模型路径（FIQA）。None 时仅用传统算法。
-    pub quality_model: Option<PathBuf>,
     /// 姿态模型路径。
     pub pose_model: Option<PathBuf>,
     /// 深度估计模型路径。
@@ -59,7 +57,6 @@ impl Default for Config {
             plate_det_model: None,
             plate_rec_model: None,
             qr_model: None,
-            quality_model: None,
             pose_model: None,
             depth_model: None,
             human_parsing_model: None,
@@ -67,7 +64,6 @@ impl Default for Config {
     }
 }
 
-#[allow(dead_code)]
 impl Config {
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
@@ -109,7 +105,6 @@ impl Config {
         cfg.plate_det_model = env_path("VISION_EXT_PLATE_DET_MODEL");
         cfg.plate_rec_model = env_path("VISION_EXT_PLATE_REC_MODEL");
         cfg.qr_model = env_path("VISION_EXT_QR_MODEL");
-        cfg.quality_model = env_path("VISION_EXT_QUALITY_MODEL");
         cfg.pose_model = env_path("VISION_EXT_POSE_MODEL");
         cfg.depth_model = env_path("VISION_EXT_DEPTH_MODEL");
         cfg.human_parsing_model = env_path("VISION_EXT_HUMAN_PARSING_MODEL");
@@ -117,9 +112,21 @@ impl Config {
         cfg
     }
 
-    /// 从 models_dir 解析模型文件名（加 .onnx 后缀）。
-    pub fn model_path(&self, name: &str) -> PathBuf {
-        self.models_dir.join(format!("{name}.onnx"))
+    /// 列出已配置模型路径的引擎能力名（deep health 与启动日志用）。
+    /// 命名与 `EngineManager::list_loaded` 一致，便于对照"配置了未加载"状态。
+    pub fn configured_engines(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.detection_model.is_some() { v.push("detection"); }
+        if self.obb_model.is_some() { v.push("obb"); }
+        if self.face_det_model.is_some() { v.push("face_detection"); }
+        if self.face_rec_model.is_some() { v.push("face_recognition"); }
+        if self.ocr_det_model.is_some() { v.push("ocr"); }
+        if self.plate_det_model.is_some() { v.push("license_plate"); }
+        if self.qr_model.is_some() { v.push("qr"); }
+        if self.pose_model.is_some() { v.push("pose"); }
+        if self.depth_model.is_some() { v.push("depth"); }
+        if self.human_parsing_model.is_some() { v.push("human_parsing"); }
+        v
     }
 }
 
@@ -130,6 +137,13 @@ fn env_path(key: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// env 是进程全局状态：并行测试写同一变量会互相覆盖（曾致 auth_token 断言
+    /// 间歇失败），所有写 env 的测试必须先持有此锁串行执行。
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn default_config_should_have_sensible_values() {
@@ -146,19 +160,8 @@ mod tests {
     }
 
     #[test]
-    fn model_path_should_join_models_dir_with_onnx_extension() {
-        let config = Config {
-            models_dir: PathBuf::from("/data/models"),
-            ..Default::default()
-        };
-        assert_eq!(
-            config.model_path("yolov8n"),
-            PathBuf::from("/data/models/yolov8n.onnx")
-        );
-    }
-
-    #[test]
     fn from_env_should_override_defaults() {
+        let _guard = env_lock();
         unsafe {
             env::set_var("VISION_EXT_PORT", "8080");
             env::set_var("VISION_EXT_DEVICE", "CUDA");
@@ -183,6 +186,7 @@ mod tests {
 
     #[test]
     fn from_env_should_ignore_empty_auth_token() {
+        let _guard = env_lock();
         unsafe {
             env::set_var("VISION_EXT_AUTH_TOKEN", "");
         }

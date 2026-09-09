@@ -100,7 +100,7 @@ YOLO('yolov8n-obb.pt').export(format='onnx', imgsz=640)   # 5.1s, 11.9MB, CPU �
 curl -s localhost:7042/health -H "X-API-Key: $KEY"
 curl -s -X POST localhost:7042/detect -H "X-API-Key: $KEY" -F "file=@testdata/bus.jpg" | jq '{status, count: .data.count}'
 curl -s -X POST localhost:7042/qr      -H "X-API-Key: $KEY" -F "file=@testdata/bus.jpg"   # 未配模型应返回明确"模型未配置"
-curl -s "localhost:7042/health?deep=true" -H "X-API-Key: $KEY"                            # deep 列出已懒加载引擎
+curl -s "localhost:7042/health?deep=true" -H "X-API-Key: $KEY"                            # deep 额外返回已配置能力清单(configured)
 ```
 
 - **count=0 也是通路验证**:bus.jpg 无车牌/无旋转目标,/license-plate、/detect/obb 返回空是正确行为,模型加载+推理+后处理链路已打通。

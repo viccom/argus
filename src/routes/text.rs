@@ -115,7 +115,7 @@ pub async fn ocr(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.ocr().await?;
     let _permit = acquire_permit(&state).await?;
@@ -127,6 +127,7 @@ pub async fn ocr(
     let dtos: Vec<TextRegionDto> = results.iter().map(TextRegionDto::from).collect();
     let count = dtos.len();
     let full_text: Vec<&str> = dtos.iter().map(|d| d.text.as_str()).collect();
+    tracing::info!(endpoint = "ocr", count, inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",
@@ -145,7 +146,7 @@ pub async fn license_plate(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.license_plate().await?;
     let _permit = acquire_permit(&state).await?;
@@ -156,6 +157,7 @@ pub async fn license_plate(
 
     let dtos: Vec<PlateDto> = results.iter().map(PlateDto::from).collect();
     let count = dtos.len();
+    tracing::info!(endpoint = "license_plate", count, inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",
@@ -173,7 +175,7 @@ pub async fn qr(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.qr().await?;
     let _permit = acquire_permit(&state).await?;
@@ -184,6 +186,7 @@ pub async fn qr(
 
     let dtos: Vec<QrDto> = results.iter().map(QrDto::from).collect();
     let count = dtos.len();
+    tracing::info!(endpoint = "qr", count, inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",

@@ -17,7 +17,7 @@
 | `POST /pose` | 人体姿态（COCO 17 关键点） | YOLOv8n-Pose |
 | `POST /depth` | 单目深度估计（min/max/mean + 64×64 预览） | Depth Anything V2 |
 | `POST /human-parsing` | 人体解析（部件占比） | PP-HumanSeg |
-| `GET /health?deep=true` | 健康检查（deep 列出已加载引擎） | — |
+| `GET /health?deep=true` | 健康检查（浅检返回已加载引擎；deep=true 额外返回已配置能力清单） | — |
 
 所有模型按需懒加载（`tokio::OnceCell`），推理经 `spawn_blocking` + 信号量背压。
 
@@ -28,6 +28,9 @@ cargo build --release --jobs 6
 ```
 
 运行时需 ORT 动态库（`load-dynamic`）与模型文件，环境变量见下。
+
+版本标识由 build.rs 编译期探测注入（git hash + dirty 标记），见 `/health` 的 `version` 字段。
+`SIGTERM`/`Ctrl+C` 触发优雅停机：等待在途请求完成后退出（60s 超时保底强退）。
 
 ## 配置（环境变量）
 

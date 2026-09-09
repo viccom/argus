@@ -32,10 +32,13 @@ pub async fn auth_middleware(
 }
 
 /// 从请求头提取 API key：优先 Authorization: Bearer，其次 X-API-Key。
+/// RFC 7235 规定 auth-scheme 大小写不敏感，`bearer`/`Bearer` 均接受。
 fn extract_api_key(req: &Request) -> Option<String> {
     if let Some(h) = req.headers().get("authorization").and_then(|v| v.to_str().ok()) {
-        if let Some(token) = h.strip_prefix("Bearer ") {
-            return Some(token.to_string());
+        let mut parts = h.splitn(2, ' ');
+        let scheme = parts.next().unwrap_or_default();
+        if scheme.eq_ignore_ascii_case("bearer") {
+            return parts.next().map(str::trim).map(str::to_string);
         }
     }
     req.headers()
@@ -109,6 +112,23 @@ mod tests {
             .await
             .unwrap();
         assert!(body_text(resp).await.contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn lowercase_bearer_scheme_should_pass() {
+        // RFC 7235: auth-scheme 大小写不敏感，"bearer" 与 "Bearer" 等价
+        let app = test_router(Some(Arc::new("my-secret".into())));
+        let resp = app
+            .oneshot(
+                Request::get("/health")
+                    .header("authorization", "bearer my-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let text = body_text(resp).await;
+        assert!(text.contains("ok"), "小写 bearer 应通过认证，实际: {text}");
     }
 
     #[tokio::test]

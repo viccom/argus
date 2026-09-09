@@ -72,10 +72,10 @@ impl From<&ObbResult> for ObbDto {
 // ---- multipart 参数 ----
 
 /// /detect 的 multipart 参数。
+///
+/// 注：不支持运行时 confidence——阈值在引擎构造时固定（rust-onnx-infer 无按请求覆盖接口）。
 struct DetectParams {
     file: Vec<u8>,
-    #[allow(dead_code)] // 后续版本支持运行时调整置信度
-    confidence: Option<f32>,
     sahi: bool,
     slice_w: Option<i32>,
     slice_h: Option<i32>,
@@ -84,7 +84,6 @@ struct DetectParams {
 
 async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams, AppError> {
     let mut file: Option<Vec<u8>> = None;
-    let mut confidence: Option<f32> = None;
     let mut sahi = false;
     let mut slice_w: Option<i32> = None;
     let mut slice_h: Option<i32> = None;
@@ -106,9 +105,6 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
                         .to_vec(),
                 );
             }
-            "confidence" => {
-                confidence = parse_field_text(&name, field).await?;
-            }
             "sahi" => {
                 let text = field_text(field).await?;
                 sahi = text.trim().eq_ignore_ascii_case("true") || text == "1";
@@ -122,14 +118,13 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
             "overlap" => {
                 overlap = parse_field_text(&name, field).await?;
             }
-            _ => { /* 忽略未知字段 */ }
+            _ => { /* 忽略未知字段（含历史 confidence） */ }
         }
     }
 
     let file = file.ok_or_else(|| AppError::BadRequest("缺少 file 字段".into()))?;
     Ok(DetectParams {
         file,
-        confidence,
         sahi,
         slice_w,
         slice_h,
@@ -164,9 +159,17 @@ pub(crate) async fn field_text(field: axum::extract::multipart::Field<'_>) -> Re
 
 // ---- 图像解码 ----
 
-pub(crate) fn decode_image(bytes: &[u8]) -> Result<Image, AppError> {
-    let dyn_img = image::load_from_memory(bytes)?;
-    Ok(Image::from_dynamic(&dyn_img))
+/// 在 spawn_blocking 中解码图像字节。
+///
+/// JPEG/PNG 解码是 CPU 密集操作（大图可达百毫秒级），与推理一样必须隔离到
+/// 阻塞线程池，否则并发大图请求会占住 tokio async worker（拖死 health 等轻端点）。
+pub(crate) async fn decode_image(bytes: Vec<u8>) -> Result<Image, AppError> {
+    tokio::task::spawn_blocking(move || {
+        image::load_from_memory(&bytes).map(|dyn_img| Image::from_dynamic(&dyn_img))
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("图像解码任务失败: {e}")))?
+    .map_err(AppError::from)
 }
 
 // ---- 背压 ----
@@ -190,7 +193,7 @@ pub async fn detect(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_detect_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.detection().await?;
 
@@ -222,6 +225,7 @@ pub async fn detect(
 
     let dtos: Vec<DetectionDto> = detections.iter().map(DetectionDto::from).collect();
     let count = dtos.len();
+    tracing::info!(endpoint = "detect", count, sahi = params.sahi, inference_ms = elapsed as u64, "推理完成");
 
     let mut data = json!({
         "detections": dtos,
@@ -241,7 +245,7 @@ pub async fn detect_obb(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_detect_multipart(multipart).await?;
-    let image = decode_image(&params.file)?;
+    let image = decode_image(params.file).await?;
 
     let engine = state.engines.obb().await?;
 
@@ -254,6 +258,7 @@ pub async fn detect_obb(
 
     let dtos: Vec<ObbDto> = results.iter().map(ObbDto::from).collect();
     let count = dtos.len();
+    tracing::info!(endpoint = "detect_obb", count, inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",
