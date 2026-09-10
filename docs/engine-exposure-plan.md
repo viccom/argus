@@ -20,7 +20,7 @@
 
 | ID | 任务 | 形态 | 模型来源 | 状态 | 验证证据 | 日期 |
 |---|---|---|---|---|---|---|
-| 1 | classification 纵切片模板(后续引擎按此复制) | G1 同构 | 待获取 | ⬜ | | |
+| 1 | classification 纵切片模板(后续引擎按此复制) | G1 同构 | yolov8n-cls.onnx(Ultralytics v8.3.0 .pt → onnx opset12/224 官方导出) | ✅ | 前置门:magic 0x08/shape [1,3,224,224]×[1,1000]/ORT 直跑 softmax sum=1.0/bus.jpg top1=minibus 0.576;TDD:config+engine+routes 3 轮先红后绿;E2E:curl /classify top1=minibus 0.581(与 python 参照 0.583 一致),top_k=2/错误路径全过;附带修复上游 resize 混叠 bug(见 2026-09-10 变更记录);测试 73→80 全绿 | 2026-09-10 |
 | 2 | reid 行人重识别(OSNet 512 维) | G1,embedding 契约同 face_rec | 待获取 | ⬜ | | |
 | 3 | segmentation 实例分割 | G2 mask,DTO 复用 depth 下采样先例 | 待获取 | ⬜ | | |
 | 4 | face_attribute 年龄/性别/表情 | G3 组合式,复用 face_recognize 两段式模板 | 待获取 | ⬜ | | |
@@ -77,3 +77,4 @@
 ## 变更记录
 
 - 2026-09-10:建表,16+1 项任务定稿,批 1 范围确认(classification/reid/segmentation/face_attribute)。
+- 2026-09-10:任务 1 classification 完成。模板沉淀:`routes/common.rs`(field_text/parse_field_text/decode_image/acquire_permit 公共工具,P2 挂账清偿)+ config/engine/routes 三层接入范式。**附带发现并修复 rust-onnx-infer 上游 resize bug**:`ResizeAlg::Interpolation` 固定核在大比率缩小(>2x)时跳过源像素(混叠,1080→224 分类置信度 0.58→0.38),改 `Convolution` 后 detect 结果也从混叠伪影 7 框收敛为标准 4 person+1 bus。回归测试 `linear_downscale_should_spread_impulse_energy`(旧算法红/新算法绿已对照验证)。上游修复未提交,待与下游一起定稿。

@@ -73,6 +73,7 @@ pub async fn service_info(State(state): State<AppState>) -> Json<Value> {
         "endpoints": {
             "GET /health": "健康检查",
             "POST /detect": "目标检测（multipart: file/sahi/slice_w/slice_h/overlap）",
+            "POST /classify": "图像分类（multipart: file/top_k?）",
             "POST /detect/obb": "OBB 旋转框检测（multipart: file）",
             "POST /face/detect": "人脸检测（multipart: file）",
             "POST /face/recognize": "人脸识别（multipart: file/known_embeddings）",
@@ -102,6 +103,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
         .route("/ui", get(crate::routes::ui::ui))
         .route("/detect", post(crate::routes::detection::detect))
         .route("/detect/obb", post(crate::routes::detection::detect_obb))
+        .route("/classify", post(crate::routes::classification::classify))
         .route("/face/detect", post(crate::routes::face::face_detect))
         .route("/face/recognize", post(crate::routes::face::face_recognize))
         .route("/ocr", post(crate::routes::text::ocr))

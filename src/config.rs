@@ -20,6 +20,8 @@ pub struct Config {
     pub shutdown_timeout_secs: u64,
     /// 检测模型路径（YOLO/RT-DETR/RF-DETR）。None 则 /detect 返回未配置错误。
     pub detection_model: Option<PathBuf>,
+    /// 图像分类模型路径（YOLO-cls 系列）。
+    pub classification_model: Option<PathBuf>,
     /// OBB 模型路径。
     pub obb_model: Option<PathBuf>,
     /// 人脸检测模型路径（YuNet）。
@@ -56,9 +58,10 @@ impl Default for Config {
             max_body_mb: 20,
             max_concurrent_inference: 0,
             engine_pool: 1,
-            detection_model: None,
-            obb_model: None,
             shutdown_timeout_secs: 10,
+            detection_model: None,
+            classification_model: None,
+            obb_model: None,
             face_det_model: None,
             face_rec_model: None,
             ocr_det_model: None,
@@ -109,14 +112,15 @@ impl Config {
                 cfg.engine_pool = n.max(1);
             }
         }
-
-        cfg.detection_model = env_path("VISION_EXT_DETECTION_MODEL");
-        cfg.obb_model = env_path("VISION_EXT_OBB_MODEL");
         if let Ok(v) = env::var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS") {
             if let Ok(n) = v.parse::<u64>() {
                 cfg.shutdown_timeout_secs = n.max(1);
             }
         }
+
+        cfg.detection_model = env_path("VISION_EXT_DETECTION_MODEL");
+        cfg.classification_model = env_path("VISION_EXT_CLASSIFICATION_MODEL");
+        cfg.obb_model = env_path("VISION_EXT_OBB_MODEL");
         cfg.face_det_model = env_path("VISION_EXT_FACE_DET_MODEL");
         cfg.face_rec_model = env_path("VISION_EXT_FACE_REC_MODEL");
         cfg.ocr_det_model = env_path("VISION_EXT_OCR_DET_MODEL");
@@ -137,6 +141,7 @@ impl Config {
     pub fn configured_engines(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
         if self.detection_model.is_some() { v.push("detection"); }
+        if self.classification_model.is_some() { v.push("classification"); }
         if self.obb_model.is_some() { v.push("obb"); }
         if self.face_det_model.is_some() { v.push("face_detection"); }
         if self.face_rec_model.is_some() { v.push("face_recognition"); }
@@ -174,18 +179,13 @@ mod tests {
         assert!(config.auth_token.is_none());
         assert_eq!(config.max_body_mb, 20);
         assert_eq!(config.max_concurrent_inference, 0);
+        assert_eq!(config.engine_pool, 1);
+        assert_eq!(config.shutdown_timeout_secs, 10);
         assert!(config.detection_model.is_none());
         assert!(config.face_det_model.is_none());
         assert!(config.ocr_det_model.is_none());
     }
 
-        assert_eq!(config.engine_pool, 1);
-        assert_eq!(config.shutdown_timeout_secs, 10);
-    #[test]
-    fn from_env_should_override_defaults() {
-        let _guard = env_lock();
-        unsafe {
-            env::set_var("VISION_EXT_PORT", "8080");
     #[test]
     fn from_env_should_override_shutdown_timeout() {
         let _guard = env_lock();
@@ -199,6 +199,11 @@ mod tests {
         }
     }
 
+    #[test]
+    fn from_env_should_override_defaults() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_PORT", "8080");
             env::set_var("VISION_EXT_DEVICE", "CUDA");
             env::set_var("VISION_EXT_AUTH_TOKEN", "secret-key-123");
             env::set_var("VISION_EXT_DETECTION_MODEL", "/models/yolo.onnx");
@@ -216,6 +221,23 @@ mod tests {
             env::remove_var("VISION_EXT_DEVICE");
             env::remove_var("VISION_EXT_AUTH_TOKEN");
             env::remove_var("VISION_EXT_DETECTION_MODEL");
+        }
+    }
+
+    #[test]
+    fn from_env_should_parse_classification_model() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_CLASSIFICATION_MODEL", "/models/yolov8n-cls.onnx");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.classification_model.as_deref(),
+            Some(std::path::Path::new("/models/yolov8n-cls.onnx"))
+        );
+        assert!(config.configured_engines().contains(&"classification"));
+        unsafe {
+            env::remove_var("VISION_EXT_CLASSIFICATION_MODEL");
         }
     }
 

@@ -120,3 +120,4 @@ curl -s "localhost:7042/health?deep=true" -H "X-API-Key: $KEY"                  
 | ORT 警告 shape 不匹配(图手术后) | shape inference 缓存旧值 | 无害,忽略 |
 | pip3 不存在但有 uv | Ubuntu 24.04 默认 | `uv venv` + `uv pip install --python <venv>/bin/python` |
 | `/detect` bbox 零宽(x≈0)、类名是数字、SAHI count=0 | 模型是 Xenova/yolo-rs 变体:检测头输出**归一化坐标**(cx∈[0,1]),解码器按 640 像素约定反算即崩塌;类名元数据缺失 | `YOLO('yolov8n.pt').export(format='onnx', imgsz=640)` 重导出标准版(判别法:python 直跑输出看 cx 值域 0~1 vs 0~640) |
+| 分类置信度系统性偏低(如 0.58 的图只出 0.38)、`no result above threshold`,但 python 同预处理直跑分数正常 | rust-onnx-infer `resize` 曾把 Linear 映射到 fast_image_resize `ResizeAlg::Interpolation`(**固定核**快速算法),大比率缩小(>2x)跳过核外源像素→混叠,质量等效 nearest;检测框不敏感所以 /detect 长期掩盖此 bug | 已修(`ResizeAlg::Convolution`,核随缩放比拉伸);判别法:python 跑 bilinear vs nearest 两变体对照分数,若 rust 分数≈nearest 即中招;诊断手段:临时 ignored 测试打印 `preprocess` 通道均值(与 python 对照)+ `run_inference` 原始 argmax |

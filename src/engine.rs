@@ -4,6 +4,7 @@ use rust_onnx_infer::{
     create_depth_engine, create_face_detection_engine, create_face_recognition_engine,
     create_ocr_pipeline, create_pose_engine, DeviceType,
 };
+use rust_onnx_infer::engines::classification::ClassificationEngine;
 use rust_onnx_infer::engines::detection::DetectionEngine;
 use rust_onnx_infer::engines::face_detection::FaceDetectResult;
 use rust_onnx_infer::engines::face_recognition::FaceRecognitionEngine;
@@ -35,6 +36,7 @@ pub struct EngineManager {
     config: Config,
     device: DeviceType,
     detection: tokio::sync::OnceCell<Arc<EnginePool<DetectionEngine>>>,
+    classification: tokio::sync::OnceCell<Arc<EnginePool<ClassificationEngine>>>,
     obb: tokio::sync::OnceCell<Arc<EnginePool<ObbDetectionEngine>>>,
     face_det: tokio::sync::OnceCell<Arc<EnginePool<DynFaceDet>>>,
     face_rec: tokio::sync::OnceCell<Arc<EnginePool<FaceRecognitionEngine>>>,
@@ -53,6 +55,7 @@ impl EngineManager {
             config,
             device,
             detection: tokio::sync::OnceCell::new(),
+            classification: tokio::sync::OnceCell::new(),
             obb: tokio::sync::OnceCell::new(),
             face_det: tokio::sync::OnceCell::new(),
             face_rec: tokio::sync::OnceCell::new(),
@@ -69,6 +72,7 @@ impl EngineManager {
     pub fn list_loaded(&self) -> Vec<&'static str> {
         let mut loaded = Vec::new();
         if self.detection.initialized() { loaded.push("detection"); }
+        if self.classification.initialized() { loaded.push("classification"); }
         if self.obb.initialized() { loaded.push("obb"); }
         if self.face_det.initialized() { loaded.push("face_detection"); }
         if self.face_rec.initialized() { loaded.push("face_recognition"); }
@@ -103,6 +107,32 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 detection 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
+                Ok(Arc::new(EnginePool::new(engines)))
+            })
+            .await
+            .cloned()
+    }
+
+    pub async fn classification(&self) -> Result<Arc<EnginePool<ClassificationEngine>>, AppError> {
+        self.classification
+            .get_or_try_init(|| async {
+                let path = self.config.classification_model.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("classification".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
+                let device = self.device;
+                let pool_size = self.config.engine_pool;
+                let mut engines = Vec::with_capacity(pool_size);
+                for _ in 0..pool_size {
+                    let p = path.clone();
+                    let engine = tokio::task::spawn_blocking(move || {
+                        ClassificationEngine::for_yolo(&p, device)
+                    })
+                    .await
+                    .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                    engines.push(Arc::new(engine));
+                }
+                tracing::info!("引擎 classification 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 Ok(Arc::new(EnginePool::new(engines)))
             })
             .await
@@ -369,6 +399,7 @@ where
         // run() 以实例数取模分发,空池会除零——在构造边界显式失败
         assert!(!instances.is_empty(), "EnginePool 至少需要一个实例");
         EnginePool {
+            permits: Arc::new(tokio::sync::Semaphore::new(instances.len())),
             instances,
             next: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -394,7 +425,6 @@ where
             .await
             .map_err(|e| AppError::Internal(format!("推理任务失败: {e}")))?
             .map_err(AppError::from)
-            permits: Arc::new(tokio::sync::Semaphore::new(instances.len())),
     }
 }
 
@@ -420,6 +450,15 @@ mod tests {
         let config = Config::default();
         let mgr = EngineManager::new(config);
         let result = mgr.detection().await;
+        assert!(result.is_err());
+        assert!(matches!(result, Err(AppError::ModelNotConfigured(_))));
+    }
+
+    #[tokio::test]
+    async fn get_classification_engine_should_error_when_not_configured() {
+        let config = Config::default();
+        let mgr = EngineManager::new(config);
+        let result = mgr.classification().await;
         assert!(result.is_err());
         assert!(matches!(result, Err(AppError::ModelNotConfigured(_))));
     }
@@ -519,7 +558,6 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AppError::Inference(_)), "实际: {err:?}");
     }
-}
 
     #[test]
     #[should_panic(expected = "EnginePool 至少需要一个实例")]
@@ -527,3 +565,4 @@ mod tests {
         // 空池防御:run() 的取模运算在 len=0 时除零,必须在构造边界显式失败
         let _ = EnginePool::<usize>::new(vec![]);
     }
+}

@@ -141,6 +141,7 @@
 // ---- 任务定义(与后端端点一一对应) ----
 const TASKS = [
   { id: "detect",       name: "目标检测",  ico: "📦", path: "/detect",           kind: "boxes" },
+  { id: "classify",     name: "图像分类",  ico: "🏷", path: "/classify",         kind: "classify" },
   { id: "obb",          name: "旋转框检测", ico: "🛩", path: "/detect/obb",      kind: "obb" },
   { id: "face_det",     name: "人脸检测",  ico: "🙂", path: "/face/detect",      kind: "face" },
   { id: "face_rec",     name: "人脸识别",  ico: "🧑‍💼", path: "/face/recognize",  kind: "faceRec" },
@@ -191,6 +192,9 @@ function renderParams(t) {
   p.classList.remove("show");
   if (t.id === "detect") {
     p.innerHTML = `<label><input type="checkbox" id="p-sahi"> SAHI 切片(小目标增强)</label>`;
+    p.classList.add("show");
+  } else if (t.id === "classify") {
+    p.innerHTML = `<label>Top-K <input type="number" id="p-topk" value="5" step="1" min="1" max="50" style="width:56px"></label>`;
     p.classList.add("show");
   } else if (t.id === "face_rec") {
     p.innerHTML = `<label>匹配阈值 <input type="number" id="p-threshold" value="0.5" step="0.05" min="0" max="1" style="width:64px"></label>`;
@@ -265,6 +269,7 @@ async function run() {
     const fd = new FormData();
     fd.append("file", blob, "image.jpg");
     if (currentTask.id === "detect" && $("p-sahi")?.checked) fd.append("sahi", "true");
+    if (currentTask.id === "classify" && $("p-topk")?.value) fd.append("top_k", $("p-topk").value);
     if (currentTask.id === "face_rec" && $("p-threshold")?.value) fd.append("threshold", $("p-threshold").value);
 
     const headers = {};
@@ -301,6 +306,7 @@ function renderResult(snap, redrawOnly) {
 
   switch (task.kind) {
     case "boxes": drawBoxes(data.detections || [], false); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class ?? d.text ?? "?", d => d.confidence ?? d.score)); break;
+    case "classify": body.append(statsBlock(stats), listBlock(data.predictions || [], d => d.class, d => d.confidence)); break;
     case "obb":   drawObb(data.detections || []); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class, d => d.confidence)); break;
     case "face":  drawFaces(data.faces || []); body.append(statsBlock(stats), listBlock(data.faces || [], () => "人脸", f => f.confidence)); break;
     case "faceRec": drawFaceRec(data.matches || [], data.embeddings || []); body.append(statsBlock(stats), faceRecBlock(data)); break;

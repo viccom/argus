@@ -11,7 +11,7 @@ use rust_onnx_infer::engines::qr_detector::QrDetection;
 use rust_onnx_infer::OnnxInferenceEngine;
 
 use crate::error::AppError;
-use crate::routes::detection::{acquire_permit, decode_image, field_text};
+use crate::routes::common::{acquire_permit, decode_image, field_text};
 use crate::routes::health::AppState;
 
 // ---- DTO ----

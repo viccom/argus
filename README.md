@@ -1,12 +1,13 @@
 # vision-ext
 
-工业视觉智能 HTTP 服务，基于 [rust-onnx-infer](https://github.com/javpower/rust-onnx-infer) 封装，提供 11 个图像推理 REST API。
+工业视觉智能 HTTP 服务，基于 [rust-onnx-infer](https://github.com/javpower/rust-onnx-infer) 封装，提供 12 个图像推理 REST API。
 
 ## 能力
 
 | 端点 | 说明 | 模型 |
 |---|---|---|
 | `POST /detect` | 目标检测（支持 SAHI 切片，`sahi=true`） | YOLO |
+| `POST /classify` | 图像分类 Top-K（`top_k`，默认 5，上限 50） | YOLOv8n-CLS |
 | `POST /detect/obb` | 旋转框检测（自动识别传统 / End2End 布局） | YOLOv8n-OBB |
 | `POST /face/detect` | 人脸检测（bbox + 5 关键点） | YuNet |
 | `POST /face/recognize` | 人脸识别（128 维嵌入 + 余弦相似度比对） | SFace |
@@ -44,7 +45,8 @@ cargo build --release --jobs 6
 | `VISION_EXT_MAX_BODY_MB` | 20 | 请求体上限 |
 | `VISION_EXT_MAX_CONCURRENT_INFERENCE` | 0 | 并发推理上限（0=不限） |
 | `VISION_EXT_ENGINE_POOL` | 1 | 每引擎实例池大小。>1 时同模型多实例并行推理（多路客户端同模型并发不再串行）。**代价**：内存 = 模型大小 × 池大小 × 已加载引擎数；CPU 预算 = 池大小 × 4（ORT 线程）× 引擎数 ≈ 核数。与多实例部署可叠加（实例数 × 池大小统算） |
-| `VISION_EXT_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `OBB` / `FACE_DET` / `FACE_REC` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`） |
+| `VISION_EXT_SHUTDOWN_TIMEOUT_SECS` | 10 | 优雅停机超时：SIGTERM 后等待在途请求的上限，超时强退。需覆盖最长推理（SAHI/depth ~1.5s，池化排队翻倍） |
+| `VISION_EXT_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `CLASSIFICATION` / `OBB` / `FACE_DET` / `FACE_REC` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`） |
 
 ## 模型下载
 
@@ -53,6 +55,7 @@ cargo build --release --jobs 6
 | 文件 | 来源 |
 |---|---|
 | `yolov8n.onnx` | Ultralytics 导出：`YOLO('yolov8n.pt').export(format='onnx', imgsz=640)`。**勿用 Xenova/yolo-rs release 变体**——其检测头输出归一化坐标（0~1）且无类名元数据，与解码器（按 640 像素空间 letterbox 反算）不兼容，表现为 bbox 零宽/SAHI 全丢弃 |
+| `yolov8n-cls.onnx` | Ultralytics 导出：`YOLO('yolov8n-cls.pt').export(format='onnx', opset=12, imgsz=224)`（.pt 取自 `ultralytics/assets` release v8.3.0）。ImageNet 1000 类标签嵌在 ONNX metadata（`names`），引擎自动读取；输出已 softmax |
 | `yolov8n-obb.onnx` | Ultralytics 导出：`YOLO('yolov8n-obb.pt').export(format='onnx', imgsz=640)` |
 | `yolov8n-pose.onnx` | [Xenova/yolov8n-pose](https://huggingface.co/Xenova/yolov8n-pose)（`onnx/model.onnx`） |
 | `face_detection_yunet_2023mar.onnx` | [opencv/face_detection_yunet](https://huggingface.co/opencv/face_detection_yunet) |
@@ -65,11 +68,17 @@ cargo build --release --jobs 6
 
 ## 依赖说明
 
-`rust-onnx-infer` 为本地 path 依赖（`../rust-onnx-infer`），本地相对上游有一处修改：
-`ort` feature `api-27` → `api-26`。原因：ort 2.0.0-rc.13 的版本检查用 ORT 库的
-release minor 与 `ORT_API_VERSION` 比较，而 ORT 1.18 起 API version = release minor + 1，
-导致 ORT 1.26.0 动态库被误判 `BadVersion`；`api-26` 下 `ORT_API_VERSION=26` 与 1.26.0 匹配，
-且 ORT 库向后兼容 api-26 接口。
+`rust-onnx-infer` 为本地 path 依赖（`../rust-onnx-infer`），本地相对上游有两处修改：
+
+1. `ort` feature `api-27` → `api-26`。原因：ort 2.0.0-rc.13 的版本检查用 ORT 库的
+   release minor 与 `ORT_API_VERSION` 比较，而 ORT 1.18 起 API version = release minor + 1，
+   导致 ORT 1.26.0 动态库被误判 `BadVersion`；`api-26` 下 `ORT_API_VERSION=26` 与 1.26.0 匹配，
+   且 ORT 库向后兼容 api-26 接口。
+2. `imaging/resize.rs`：`Interpolation::Linear/Cubic` 由 `ResizeAlg::Interpolation`（固定核
+   快速算法）改为 `ResizeAlg::Convolution`（核随缩放比拉伸）。原因：固定核在大比率缩小（>2x）
+   时跳过核外源像素产生混叠——1080→224 缩小时分类置信度 0.58 崩至 0.38（等效 nearest）、
+   detect 出混叠伪影框；修复后 detect 收敛为标准结果。附回归测试
+   `linear_downscale_should_spread_impulse_energy`。
 
 ## License
 
