@@ -152,6 +152,22 @@
 | 每请求 confidence 后过滤与 SAHI 交互 | 低 | SAHI 路径同样低阈值构造+后过滤;E2E 用例覆盖 |
 | fork 后上游 javpower 有更新 | 低 | fork 保留 upstream remote,按需 cherry-pick |
 
+## 执行状态(新会话冷启动先读本节)
+
+| 阶段 | 状态 | 验证证据 | 日期 |
+|---|---|---|---|
+| 0 fork rust-onnx-infer | ⬜ | | |
+| 1 GPU 硬化(显存上限/预热/深检/背压可配) | ⬜ | | |
+| 2 EngineManager 动态化(与 P2 重构合并,**批 1 收尾后才开始**) | ⬜ | | |
+| 3 HTTP 参数层(confidence 后过滤/batch/ROI) | ⬜ | | |
+| 4 A100 对标压测(yhpc,基线 500 QPS) | ⬜ | | |
+| 5 safe-bot 消费方改造 | ⬜ | | |
+| 6 yolo-rs 归档 | ⬜ | | |
+
+- 每完成一阶段更新本表(状态+验证证据+日期),不等记忆;
+- 并行线(能力广度)进度见 `engine-exposure-plan.md` 批次表,两表互链;
+- 开工顺序建议:0→1 可立即开始;2 必须等批 1(任务 2-4)收尾。
+
 ## 变更记录
 
 - 2026-09-10:调研成文(yolo-rs 19 文件全读);阶段 0-6 定稿;与 engine-exposure-plan.md 批次表互链。
