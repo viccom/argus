@@ -130,6 +130,7 @@
 - save_result 暂缓(契约适配期)。
 
 ### 阶段 4:A100 对标(实测说话,~1 天)
+- **CPU 前置基线(2026-09-10 实测,16 核共享 KVM)**:vision-ext 与 yolo-rs 同机对压(同 ORT 1.26.0 dylib、同模型文件、同图、同压测脚本)。pool=1/intra=4:单请求 p50 67ms vs 79ms(vision-ext 快 16%),吞吐上限 17-18 vs 20-22 QPS(yolo-rs 预处理在 session 锁外,串行段短;pool>1 时差距消失)。pool=4/intra=4:**天花板打平 ~34-35 QPS**,vision-ext p95 全档优 10~30%(c=16: 534 vs 796ms),c=128 双方零错误。结论:纯 CPU 下 vision-ext 已达 yolo-rs 同水平;500 QPS 基线仍待本阶段 A100 实测。压测脚本 `scripts/bench_http.py`;yolo-rs 对照服务已注册 warden(:7041,auto_start=false)。
 - yhpc 部署:CUDA 12.8.1(cuDNN 9.8)容器基底(勿回退 9.1,差 2 倍);ORT 1.26.0;
 - `gpu_mem_limit_mb = 模型数 × 单模型峰值`(yolov8n ~3GB/Session 起步);`acquire_timeout_ms=0` + `max_concurrent=pool_size` + `engine_pool` 与 `ORT 线程`预算对齐(pool×intra≈核);
 - 压测基线:对齐 yolo-rs 的 500 QPS(bench 脚本可复用其 `scripts/bench_http.py` 思路);

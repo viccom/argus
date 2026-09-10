@@ -124,3 +124,6 @@ curl -s "localhost:7042/health?deep=true" -H "X-API-Key: $KEY"                  
 | /human-parsing 只返回唯一部件"Hat"且占比=人像前景占比 | **模型语义错配**:引擎是 ATR 18 类人衣解析(ImageNet 归一化/512 输入,配套 segformer_b2_clothes),却喂了 pp_humanseg 人像**分割**模型(单通道 0/1 掩码)——掩码值 1 映射到标签表[1]="Hat",整个人被标成帽子 | 换 `segformer_b2_clothes.onnx`(mattmdjaga/segformer_b2_clothes);判别法:近景多人图若唯一部件且占比≈前景占比即中招 |
 | hf-mirror 下载大模型得到损坏文件(onnx load 报 Wire format corrupt) | 大文件(>100MB)经镜像下载可能**静默截断**(56MB/110MB 无报错) | 下载后必须校验:大小对照 HF 页面 + `xxd -l 4` magic + onnx 加载;不完整 `curl -L --retry 3` 重下 |
 | 前端显示"未检出目标"但后端日志识别成功 | **前后端字段契约脱节**:后端 /license-plate 返回 `data.plates`,前端 plate 卡片按 kind="boxes" 读 `data.detections` | 前端新增 kind="plates" 读正确字段;此类问题根修是后端显式契约(如 depth preview_cols 先例),前端不猜字段名 |
+| /classify 对多主体场景图返回空 predictions(引擎有推理、日志正常) | 分类引擎默认置信度阈值 0.5,`predict_top_k` 先过阈值再取 top-k;场景图概率分散后 top-1 < 0.5 即返回空——**文档化语义(空结果非错误)**,但消费方易误判为服务故障 | 单主体图验证(猫图 top1 0.74 正常);需要场景图分类时给引擎调低构造阈值(另立任务) |
+| /detect/obb 对地面照片恒 0 框 | 唯一可用模型 yolov8n-obb 是 **DOTA 航拍 15 类**(飞机/船/小车…),地面视角属域错配,0 框是模型的正确行为 | 端点链路用深检验证;正向验证需航拍/俯拍图(含 DOTA 类目标) |
+| warden 服务级环境变量只注入了第一个键 | services.toml 服务级字段名是 **`environment`**;写成 `env` 被 serde **静默忽略**(`env` 是 `[daemon]` 段全局变量键)——排查法:`tr '\0' '\n' < /proc/<pid>/environ` 对照 toml | 字段名改 `environment`;此类静默丢失建议 warden 后续加 unknown-field 告警 |
