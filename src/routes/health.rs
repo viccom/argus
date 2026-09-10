@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -65,7 +66,21 @@ pub async fn health(
 }
 
 /// GET / — 服务信息端点：服务名、版本、端点列表。
-pub async fn service_info(State(state): State<AppState>) -> Json<Value> {
+///
+/// 内容协商：浏览器地址栏访问（Accept 含 text/html）302 跳转 `/ui`（省去手动
+/// 拼 URL）；curl/fetch 等非浏览器客户端（无 Accept 或 */*/application/json）
+/// 保持 JSON——API 语义不变。
+pub async fn service_info(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let accept = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if accept.contains("text/html") {
+        return axum::response::Redirect::to("/ui").into_response();
+    }
     Json(json!({
         "service": "vision-ext",
         "version": crate::version::version_string(),
@@ -86,6 +101,7 @@ pub async fn service_info(State(state): State<AppState>) -> Json<Value> {
             "POST /human-parsing": "人体解析（multipart: file）"
         }
     }))
+    .into_response()
 }
 
 /// 构建应用路由（提取自 main 以便测试）。
@@ -259,6 +275,45 @@ mod tests {
         assert!(ct.contains("text/html"), "应为 HTML: {ct}");
         let text = body_text(resp).await;
         assert!(text.contains("vision-ext"), "页面应含服务标识: {text}");
+    }
+
+    #[tokio::test]
+    async fn root_should_redirect_browsers_to_ui() {
+        // 浏览器地址栏访问 Accept 含 text/html → 302 /ui
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(
+                Request::get("/")
+                    .header("accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // axum Redirect::to = 303 See Other(浏览器 GET 重定向标准语义,等价 302)
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "浏览器访问 / 应重定向到 /ui");
+        assert_eq!(
+            resp.headers().get("location").and_then(|v| v.to_str().ok()),
+            Some("/ui")
+        );
+    }
+
+    #[tokio::test]
+    async fn root_should_keep_json_for_non_browser_clients() {
+        // curl/fetch(无 Accept 或非 html)保持 JSON API 语义
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(
+                Request::get("/")
+                    .header("accept", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let text = body_text(resp).await;
+        assert!(text.contains("vision-ext"), "非浏览器应返回 service_info JSON: {text}");
     }
 
     #[tokio::test]

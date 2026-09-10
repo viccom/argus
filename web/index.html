@@ -103,7 +103,7 @@
   <h1>vision<span>-ext</span> 控制台</h1>
   <span class="legend" id="ver"></span>
   <div class="spacer"></div>
-  <input type="password" id="apikey" placeholder="API Key(服务启用认证时填写)">
+  <input type="password" id="apikey" value="__DEFAULT_API_KEY__" placeholder="API Key(服务启用认证时填写)">
 </header>
 <main>
   <div id="stage">
@@ -146,7 +146,7 @@ const TASKS = [
   { id: "face_det",     name: "人脸检测",  ico: "🙂", path: "/face/detect",      kind: "face" },
   { id: "face_rec",     name: "人脸识别",  ico: "🧑‍💼", path: "/face/recognize",  kind: "faceRec" },
   { id: "ocr",          name: "文字识别",  ico: "🔤", path: "/ocr",              kind: "ocr" },
-  { id: "plate",        name: "车牌识别",  ico: "🚗", path: "/license-plate",    kind: "boxes" },
+  { id: "plate",        name: "车牌识别",  ico: "🚗", path: "/license-plate",    kind: "plates" },
   { id: "qr",           name: "二维码检测", ico: "🔳", path: "/qr",              kind: "qr" },
   { id: "quality",      name: "质量评估",  ico: "🎚", path: "/quality",          kind: "quality" },
   { id: "pose",         name: "姿态估计",  ico: "🧍", path: "/pose",             kind: "pose" },
@@ -306,6 +306,8 @@ function renderResult(snap, redrawOnly) {
 
   switch (task.kind) {
     case "boxes": drawBoxes(data.detections || [], false); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class ?? d.text ?? "?", d => d.confidence ?? d.score)); break;
+    // 后端契约:data.plates[{bbox,text,score,plate_type}](字段名与 detect 不同,曾误读 detections 致永远"未检出")
+    case "plates": drawBoxes(data.plates || []); body.append(statsBlock(stats), listBlock(data.plates || [], d => `${d.text}(${d.plate_type ?? "?"})`, d => d.score)); break;
     case "classify": body.append(statsBlock(stats), listBlock(data.predictions || [], d => d.class, d => d.confidence)); break;
     case "obb":   drawObb(data.detections || []); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class, d => d.confidence)); break;
     case "face":  drawFaces(data.faces || []); body.append(statsBlock(stats), listBlock(data.faces || [], () => "人脸", f => f.confidence)); break;
