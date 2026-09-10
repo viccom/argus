@@ -41,8 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 优雅停机：SIGINT/SIGTERM 后停止接受新连接，等待在途请求（含长推理）完成；
     // 超时保底强退，防止个别悬挂连接导致进程无法退出。
+    // 超时取 3s：浏览器 keep-alive 连接不会主动关闭，长超时只会拉长停机窗口
+    //（共享机上被外部周期性终止时，60s 等待意味着每轮 1 分钟不可用）。
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
-    match tokio::time::timeout(std::time::Duration::from_secs(60), server).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(3), server).await {
         Ok(result) => result?,
         Err(_) => tracing::error!("优雅停机超时（60s），强制退出"),
     }

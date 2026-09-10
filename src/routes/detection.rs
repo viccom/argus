@@ -195,7 +195,7 @@ pub async fn detect(
     let params = parse_detect_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.detection().await?;
+    let pool = state.engines.detection().await?;
 
     let _permit = acquire_permit(&state).await?;
 
@@ -212,13 +212,12 @@ pub async fn detect(
             cfg.overlap_width_ratio = o;
             cfg.overlap_height_ratio = o;
         }
-        let result = crate::engine::run_blocking(move || {
-            predict_sliced_detection(engine.as_ref(), engine.as_ref(), &image, &cfg)
-        })
-        .await?;
+        let result = pool
+            .run(move |e| predict_sliced_detection(e, e, &image, &cfg))
+            .await?;
         (result.detections, Some(result.num_slices))
     } else {
-        let dets = crate::engine::run_blocking(move || engine.predict(&image)).await?;
+        let dets = pool.run(move |e| e.predict(&image)).await?;
         (dets, None)
     };
     let elapsed = t0.elapsed().as_millis();
@@ -247,13 +246,12 @@ pub async fn detect_obb(
     let params = parse_detect_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.obb().await?;
+    let pool = state.engines.obb().await?;
 
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let results =
-        crate::engine::run_blocking(move || engine.predict(&image)).await?;
+    let results = pool.run(move |e| e.predict(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<ObbDto> = results.iter().map(ObbDto::from).collect();

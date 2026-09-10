@@ -259,11 +259,11 @@ pub async fn pose(
     let params = parse_file_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.pose().await?;
+    let pool = state.engines.pose().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let results = crate::engine::run_blocking(move || engine.predict(&image)).await?;
+    let results = pool.run(move |e| e.predict(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<PoseDto> = results.iter().map(PoseDto::from).collect();
@@ -288,11 +288,11 @@ pub async fn depth(
     let params = parse_file_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.depth().await?;
+    let pool = state.engines.depth().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let mask = crate::engine::run_blocking(move || engine.predict(&image)).await?;
+    let mask = pool.run(move |e| e.predict(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dto = DepthDto::from(&mask);
@@ -315,11 +315,11 @@ pub async fn human_parsing(
     let params = parse_file_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.human_parsing().await?;
+    let pool = state.engines.human_parsing().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let map = crate::engine::run_blocking(move || engine.predict(&image)).await?;
+    let map = pool.run(move |e| e.predict(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dto = HumanParsingDto::from(&map);

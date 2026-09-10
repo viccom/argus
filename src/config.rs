@@ -10,6 +10,10 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub max_body_mb: usize,
     pub max_concurrent_inference: usize,
+    /// 每个引擎的实例池大小(同模型多实例并行推理)。默认 1 = 单实例串行,行为与池化前一致。
+    /// 注意:对全部已加载引擎生效——内存代价为 模型大小 × 池大小 × 已加载引擎数,
+    /// 且 池大小 × 每实例 ORT 线程数(默认 4)应 ≈ 可用核数。
+    pub engine_pool: usize,
     /// 检测模型路径（YOLO/RT-DETR/RF-DETR）。None 则 /detect 返回未配置错误。
     pub detection_model: Option<PathBuf>,
     /// OBB 模型路径。
@@ -47,6 +51,7 @@ impl Default for Config {
             auth_token: None,
             max_body_mb: 20,
             max_concurrent_inference: 0,
+            engine_pool: 1,
             detection_model: None,
             obb_model: None,
             face_det_model: None,
@@ -92,6 +97,11 @@ impl Config {
         if let Ok(v) = env::var("VISION_EXT_MAX_CONCURRENT_INFERENCE") {
             if let Ok(n) = v.parse() {
                 cfg.max_concurrent_inference = n;
+            }
+        }
+        if let Ok(v) = env::var("VISION_EXT_ENGINE_POOL") {
+            if let Ok(n) = v.parse::<usize>() {
+                cfg.engine_pool = n.max(1);
             }
         }
 

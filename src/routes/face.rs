@@ -188,11 +188,11 @@ pub async fn face_detect(
     let params = parse_face_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.face_detection().await?;
+    let pool = state.engines.face_detection().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let faces = crate::engine::run_blocking(move || engine.predict(&image)).await?;
+    let faces = pool.run(move |e| e.predict(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<FaceDetectDto> = faces.iter().map(FaceDetectDto::from).collect();
@@ -220,24 +220,22 @@ pub async fn face_recognize(
     let params = parse_recognize_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let det_engine = state.engines.face_detection().await?;
-    let rec_engine = state.engines.face_recognition().await?;
+    let det_pool = state.engines.face_detection().await?;
+    let rec_pool = state.engines.face_recognition().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let image_clone = image.clone();
-    let faces = crate::engine::run_blocking(move || det_engine.predict(&image_clone)).await?;
+    let faces = det_pool.run(move |e| e.predict(&image_clone)).await?;
 
-    // 逐脸提取嵌入
+    // 逐脸提取嵌入(每次经池取实例,天然公平)
     let mut matches: Vec<FaceMatchDto> = Vec::with_capacity(faces.len());
     let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(faces.len());
 
     for (idx, face) in faces.iter().enumerate() {
         let landmarks = face.landmarks.clone();
         let img = image.clone();
-        let rec = rec_engine.clone();
-        let emb = crate::engine::run_blocking(move || rec.extract(&img, &landmarks))
-            .await?;
+        let emb = rec_pool.run(move |e| e.extract(&img, &landmarks)).await?;
         embeddings.push(emb.clone());
 
         // 在已知库中找最高相似度

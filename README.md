@@ -43,6 +43,7 @@ cargo build --release --jobs 6
 | `VISION_EXT_AUTH_TOKEN` | 无 | 设置后启用 API key（`X-API-Key` 或 `Authorization: Bearer`） |
 | `VISION_EXT_MAX_BODY_MB` | 20 | 请求体上限 |
 | `VISION_EXT_MAX_CONCURRENT_INFERENCE` | 0 | 并发推理上限（0=不限） |
+| `VISION_EXT_ENGINE_POOL` | 1 | 每引擎实例池大小。>1 时同模型多实例并行推理（多路客户端同模型并发不再串行）。**代价**：内存 = 模型大小 × 池大小 × 已加载引擎数；CPU 预算 = 池大小 × 4（ORT 线程）× 引擎数 ≈ 核数。与多实例部署可叠加（实例数 × 池大小统算） |
 | `VISION_EXT_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `OBB` / `FACE_DET` / `FACE_REC` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`） |
 
 ## 模型下载

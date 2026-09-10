@@ -117,11 +117,11 @@ pub async fn ocr(
     let params = parse_file_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.ocr().await?;
+    let pool = state.engines.ocr().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let results = crate::engine::run_blocking(move || engine.predict(&image)).await?;
+    let results = pool.run(move |e| e.predict(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<TextRegionDto> = results.iter().map(TextRegionDto::from).collect();
@@ -148,11 +148,11 @@ pub async fn license_plate(
     let params = parse_file_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.license_plate().await?;
+    let pool = state.engines.license_plate().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let results = crate::engine::run_blocking(move || engine.recognize(&image)).await?;
+    let results = pool.run(move |e| e.recognize(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<PlateDto> = results.iter().map(PlateDto::from).collect();
@@ -177,11 +177,11 @@ pub async fn qr(
     let params = parse_file_multipart(multipart).await?;
     let image = decode_image(params.file).await?;
 
-    let engine = state.engines.qr().await?;
+    let pool = state.engines.qr().await?;
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let results = crate::engine::run_blocking(move || engine.detect(&image)).await?;
+    let results = pool.run(move |e| e.detect(&image)).await?;
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<QrDto> = results.iter().map(QrDto::from).collect();

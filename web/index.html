@@ -300,8 +300,8 @@ function renderResult(snap, redrawOnly) {
   if (data.sahi_slices !== undefined) stats.push(`<div class="stat"><div class="v">${data.sahi_slices}</div><div class="k">切片数</div></div>`);
 
   switch (task.kind) {
-    case "boxes": drawBoxes(data.detections || [], false); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class ?? d.text ?? "?", d.confidence ?? d.score)); break;
-    case "obb":   drawObb(data.detections || []); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class, d.confidence)); break;
+    case "boxes": drawBoxes(data.detections || [], false); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class ?? d.text ?? "?", d => d.confidence ?? d.score)); break;
+    case "obb":   drawObb(data.detections || []); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class, d => d.confidence)); break;
     case "face":  drawFaces(data.faces || []); body.append(statsBlock(stats), listBlock(data.faces || [], () => "人脸", f => f.confidence)); break;
     case "faceRec": drawFaceRec(data.matches || [], data.embeddings || []); body.append(statsBlock(stats), faceRecBlock(data)); break;
     case "ocr":   drawOcr(data.regions || []); body.append(statsBlock(stats), ocrBlock(data)); break;
