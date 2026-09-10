@@ -74,7 +74,12 @@
 代码为确定性劳动(G1 约 30-60 分钟/个,G2/G3 约 1-1.5 小时/个);模型获取另计。
 批 1 ≈ 1.5 个工作日(含模型);全部批次 ≈ 4-5 个工作日。
 
+## 与 yolo-rs 吸收计划的关系
+
+2026-09-10 决策:yolo-rs(未与 safe-bot 实际对接)停止演进,其核心能力由本服务吸收,详见 **`docs/yolo-rs-absorption-plan.md`**(调研细节 + 阶段 0-6 实施方案,唯一事实源)。两线并行节奏:批 1/2 引擎暴露(能力广度)先行,吸收计划阶段 1(GPU 硬化)可交错,阶段 2(EngineManager 动态化)在批 1 收尾后与本表 P2 结构重构合并执行。
+
 ## 变更记录
 
 - 2026-09-10:建表,16+1 项任务定稿,批 1 范围确认(classification/reid/segmentation/face_attribute)。
 - 2026-09-10:任务 1 classification 完成。模板沉淀:`routes/common.rs`(field_text/parse_field_text/decode_image/acquire_permit 公共工具,P2 挂账清偿)+ config/engine/routes 三层接入范式。**附带发现并修复 rust-onnx-infer 上游 resize bug**:`ResizeAlg::Interpolation` 固定核在大比率缩小(>2x)时跳过源像素(混叠,1080→224 分类置信度 0.58→0.38),改 `Convolution` 后 detect 结果也从混叠伪影 7 框收敛为标准 4 person+1 bus。回归测试 `linear_downscale_should_spread_impulse_energy`(旧算法红/新算法绿已对照验证)。上游修复未提交,待与下游一起定稿。
+- 2026-09-10:yolo-rs 吸收计划定稿(见 `yolo-rs-absorption-plan.md`),两线并行节奏确认。
