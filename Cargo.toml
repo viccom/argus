@@ -9,7 +9,10 @@ license = "MIT"
 cuda = ["rust-onnx-infer/cuda"]
 
 [dependencies]
-rust-onnx-infer = { path = "../rust-onnx-infer", default-features = false, features = ["load-dynamic"] }
+# 上游 javpower/rust-onnx-infer 的 viccom fork(本地 api-26 + resize 卷积修复两补丁)。
+# path 依赖只在本机可用,换 git 依赖消除单点:fork 是独立 GitHub 仓库,CI/他机可复现。
+# 具体 commit 由 Cargo.lock 锁定;rust-onnx-infer 改动后 push → `cargo update -p rust-onnx-infer`。
+rust-onnx-infer = { git = "https://github.com/viccom/rust-onnx-infer.git", branch = "master", default-features = false, features = ["load-dynamic"] }
 axum = { version = "0.8", features = ["multipart", "tokio"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"

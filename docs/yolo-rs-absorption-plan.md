@@ -156,7 +156,7 @@
 
 | 阶段 | 状态 | 验证证据 | 日期 |
 |---|---|---|---|
-| 0 fork rust-onnx-infer | ⬜ | | |
+| 0 fork rust-onnx-infer | ✅ | fork viccom/rust-onnx-infer(public,origin=fork/upstream=javpower);推送本地 2 提交(8158cf0..0156c8d);vision-ext Cargo.toml path→git 依赖(锁定 commit 0156c8d5);README 依赖说明改写;`cargo build --jobs 6` 通过;`cargo test --jobs 6` 84+1 全绿;warden 重启后 bus.jpg 替代图检出逐位一致(7 框 5bird+2sheep,bbox/confidence 全同,仅 inference_ms 271→286 首次加载波动) | 2026-09-10 |
 | 1 GPU 硬化(显存上限/预热/深检/背压可配) | ⬜ | | |
 | 2 EngineManager 动态化(与 P2 重构合并,**批 1 收尾后才开始**) | ⬜ | | |
 | 3 HTTP 参数层(confidence 后过滤/batch/ROI) | ⬜ | | |

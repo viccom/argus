@@ -1,6 +1,6 @@
 # vision-ext
 
-工业视觉智能 HTTP 服务，基于 [rust-onnx-infer](https://github.com/javpower/rust-onnx-infer) 封装，提供 12 个图像推理 REST API。
+工业视觉智能 HTTP 服务，基于 [rust-onnx-infer](https://github.com/viccom/rust-onnx-infer) 封装，提供 12 个图像推理 REST API。
 
 ## 能力
 
@@ -68,7 +68,7 @@ cargo build --release --jobs 6
 
 ## 依赖说明
 
-`rust-onnx-infer` 为本地 path 依赖（`../rust-onnx-infer`），本地相对上游有两处修改：
+`rust-onnx-infer` 为 [viccom/rust-onnx-infer](https://github.com/viccom/rust-onnx-infer)（上游 [javpower/rust-onnx-infer](https://github.com/javpower/rust-onnx-infer) 的 fork），以 git 依赖引入（Cargo.toml，具体 commit 由 Cargo.lock 锁定）。相对上游有两处修改：
 
 1. `ort` feature `api-27` → `api-26`。原因：ort 2.0.0-rc.13 的版本检查用 ORT 库的
    release minor 与 `ORT_API_VERSION` 比较，而 ORT 1.18 起 API version = release minor + 1，
@@ -79,6 +79,10 @@ cargo build --release --jobs 6
    时跳过核外源像素产生混叠——1080→224 缩小时分类置信度 0.58 崩至 0.38（等效 nearest）、
    detect 出混叠伪影框；修复后 detect 收敛为标准结果。附回归测试
    `linear_downscale_should_spread_impulse_energy`。
+
+本地开发时 `../rust-onnx-infer` 仍为源仓库（`origin` = fork、`upstream` = javpower）；
+改 rust-onnx-infer 后 `git push origin master`，再在本仓库 `cargo update -p rust-onnx-infer` 拉取新 commit。
+上游更新按需 cherry-pick：`git fetch upstream && git cherry-pick <commit>`。
 
 ## License
 
