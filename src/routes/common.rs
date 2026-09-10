@@ -10,9 +10,6 @@ use rust_onnx_infer::Image;
 use crate::error::AppError;
 use crate::routes::health::AppState;
 
-/// 背压排队超时：超过该时间仍未拿到推理许可则拒绝请求。
-const INFERENCE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// 读取单个 multipart 文本字段。
 pub(crate) async fn field_text(field: axum::extract::multipart::Field<'_>) -> Result<String, AppError> {
     let bytes = field
@@ -53,13 +50,27 @@ pub(crate) async fn decode_image(bytes: Vec<u8>) -> Result<Image, AppError> {
 }
 
 /// 获取推理许可（全局并发背压信号量）。
+///
+/// 超时由 `VISION_EXT_ACQUIRE_TIMEOUT_MS` 控制（默认 30000ms 排队式）：
+/// - `> 0`：在信号量上等待,超时返回 Overload(内网低负载排队更友好);
+/// - `0`：try_acquire fail-fast——耗尽即拒,不排队(生产 GPU 防 arena 雪崩,
+///   与 max_concurrent=pool_size 对齐)。
 pub(crate) async fn acquire_permit(state: &AppState) -> Result<tokio::sync::OwnedSemaphorePermit, AppError> {
-    let permit = tokio::time::timeout(
-        INFERENCE_ACQUIRE_TIMEOUT,
-        state.inference_semaphore.clone().acquire_owned(),
-    )
-    .await
-    .map_err(|_| AppError::Overload("推理排队超时，请稍后重试".into()))?
-    .map_err(|_| AppError::Internal("信号量已关闭".into()))?;
-    Ok(permit)
+    let timeout_ms = state.config.acquire_timeout_ms;
+    if timeout_ms == 0 {
+        // fail-fast:try_acquire 不阻塞,拿不到立即拒绝
+        state
+            .inference_semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AppError::Overload("推理并发已满(fail-fast),请稍后重试".into()))
+    } else {
+        tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            state.inference_semaphore.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| AppError::Overload("推理排队超时，请稍后重试".into()))?
+        .map_err(|_| AppError::Internal("信号量已关闭".into()))
+    }
 }

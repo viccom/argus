@@ -18,6 +18,15 @@ pub struct Config {
     /// 需覆盖最长推理(SAHI/depth 单次 ~1.5s,池化排队可翻倍),默认 10s;
     /// 过大(如旧值 60)在浏览器 keep-alive 不关闭时白白拉长停机窗口。
     pub shutdown_timeout_secs: u64,
+    /// GPU 显存上限(MB)。0 = 不设上限(仅 CPU / 向后兼容)。
+    /// CUDA arena 只增不减:A100 实测单 yolov8n 每 Session ~2.9GB,pool=4 饱和时
+    /// 11.4GB;不设上限曾与 vLLM 共存膨胀至 81GB 打死服务(cuBLAS OOM 后永久失败)。
+    /// 生产 GPU 必设:模型数 × 单模型峰值(yolov8n ~3GB/Session 起步)。
+    pub gpu_mem_limit_mb: usize,
+    /// 推理背压排队超时(毫秒)。默认 30000(排队式,内网低负载更友好);
+    /// **0 = fail-fast**(try_acquire,耗尽即拒,生产 GPU 防 arena 雪崩,
+    /// 与 max_concurrent=pool_size 对齐)。
+    pub acquire_timeout_ms: u64,
     /// 检测模型路径（YOLO/RT-DETR/RF-DETR）。None 则 /detect 返回未配置错误。
     pub detection_model: Option<PathBuf>,
     /// 图像分类模型路径（YOLO-cls 系列）。
@@ -59,6 +68,8 @@ impl Default for Config {
             max_concurrent_inference: 0,
             engine_pool: 1,
             shutdown_timeout_secs: 10,
+            gpu_mem_limit_mb: 0,
+            acquire_timeout_ms: 30000,
             detection_model: None,
             classification_model: None,
             obb_model: None,
@@ -115,6 +126,16 @@ impl Config {
         if let Ok(v) = env::var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS") {
             if let Ok(n) = v.parse::<u64>() {
                 cfg.shutdown_timeout_secs = n.max(1);
+            }
+        }
+        if let Ok(v) = env::var("VISION_EXT_GPU_MEM_LIMIT_MB") {
+            if let Ok(n) = v.parse::<usize>() {
+                cfg.gpu_mem_limit_mb = n;
+            }
+        }
+        if let Ok(v) = env::var("VISION_EXT_ACQUIRE_TIMEOUT_MS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.acquire_timeout_ms = n;
             }
         }
 
@@ -196,6 +217,58 @@ mod tests {
         assert_eq!(config.shutdown_timeout_secs, 30);
         unsafe {
             env::remove_var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    fn default_config_should_have_zero_gpu_mem_limit() {
+        let config = Config::default();
+        assert_eq!(config.gpu_mem_limit_mb, 0, "默认不设显存上限(CPU/向后兼容)");
+    }
+
+    #[test]
+    fn default_config_should_have_30s_acquire_timeout() {
+        let config = Config::default();
+        assert_eq!(config.acquire_timeout_ms, 30000, "默认排队式 30s");
+    }
+
+    #[test]
+    fn from_env_should_override_gpu_mem_limit() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_GPU_MEM_LIMIT_MB", "4096");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.gpu_mem_limit_mb, 4096);
+        unsafe {
+            env::remove_var("VISION_EXT_GPU_MEM_LIMIT_MB");
+        }
+    }
+
+    #[test]
+    fn from_env_should_override_acquire_timeout() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ACQUIRE_TIMEOUT_MS", "5000");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.acquire_timeout_ms, 5000);
+        unsafe {
+            env::remove_var("VISION_EXT_ACQUIRE_TIMEOUT_MS");
+        }
+    }
+
+    #[test]
+    fn from_env_should_allow_zero_acquire_timeout_for_fail_fast() {
+        // 0 = try_acquire fail-fast(生产 GPU 防 arena 雪崩)
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ACQUIRE_TIMEOUT_MS", "0");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.acquire_timeout_ms, 0, "0 必须原样保留(fail-fast 语义)");
+        unsafe {
+            env::remove_var("VISION_EXT_ACQUIRE_TIMEOUT_MS");
         }
     }
 

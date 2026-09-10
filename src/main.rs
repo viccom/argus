@@ -20,6 +20,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = config.port;
     let auth_token = config.auth_token.clone().map(Arc::new);
 
+    // GPU 显存上限:必须在创建任何 ONNX Session 之前设置(进程级 override,
+    // 各引擎 OnnxRuntimeConfig::defaults() 自动读取)。
+    // CUDA arena 只增不减:不设上限曾与 vLLM 共存膨胀至 81GB 打死服务。
+    if config.gpu_mem_limit_mb > 0 {
+        rust_onnx_infer::set_global_gpu_mem_limit(config.gpu_mem_limit_mb);
+        tracing::info!(
+            gpu_mem_limit_mb = config.gpu_mem_limit_mb,
+            "GPU 显存上限已设置(CUDA arena 防雪崩)"
+        );
+    }
+
     tracing::info!(
         version = %crate::version::version_string(),
         device = %config.device,

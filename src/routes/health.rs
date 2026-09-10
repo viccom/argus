@@ -45,8 +45,10 @@ pub struct HealthQuery {
 
 /// GET /health[?deep=true]
 ///
-/// 浅检返回已加载引擎（`engines`）；deep=true 追加 `configured`（配置了模型路径的
-/// 能力清单），两者对照可见"配置了未加载"的引擎。
+/// 浅检返回已加载引擎（`engines`）；deep=true 追加:
+/// - `configured`:配置了模型路径的能力清单(与 engines 对照可见"配置了未加载");
+/// - `engine_health`:对每个已加载引擎发 dummy 推理,返回 ok/degraded 状态数组。
+///   动机:arena OOM 后 cuBLAS 永久失败,浅检(端口活)不可见——僵尸态。
 pub async fn health(
     State(state): State<AppState>,
     Query(query): Query<HealthQuery>,
@@ -61,6 +63,8 @@ pub async fn health(
     });
     if query.deep.unwrap_or(false) {
         body["configured"] = json!(state.config.configured_engines());
+        let health_results = state.engines.deep_health_check().await;
+        body["engine_health"] = json!(health_results);
     }
     Json(body)
 }

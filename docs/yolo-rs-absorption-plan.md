@@ -157,7 +157,7 @@
 | 阶段 | 状态 | 验证证据 | 日期 |
 |---|---|---|---|
 | 0 fork rust-onnx-infer | ✅ | fork viccom/rust-onnx-infer(public,origin=fork/upstream=javpower);推送本地 2 提交(8158cf0..0156c8d);vision-ext Cargo.toml path→git 依赖(锁定 commit 0156c8d5);README 依赖说明改写;`cargo build --jobs 6` 通过;`cargo test --jobs 6` 84+1 全绿;warden 重启后 bus.jpg 替代图检出逐位一致(7 框 5bird+2sheep,bbox/confidence 全同,仅 inference_ms 271→286 首次加载波动) | 2026-09-10 |
-| 1 GPU 硬化(显存上限/预热/深检/背压可配) | ⬜ | | |
+| 1 GPU 硬化(显存上限/预热/深检/背压可配) | ✅ | **缺口 A**:rust-onnx-infer 加进程级 `GLOBAL_GPU_MEM_LIMIT_MB: AtomicUsize` + `set_global_gpu_mem_limit()`,`add_cuda_ep` 在 >0 时调 `CUDA::with_memory_limit(mb*1024*1024)`(已 push fork commit e9a5900);vision-ext `main.rs` 启动时 `VISION_EXT_GPU_MEM_LIMIT_MB>0` 即 override。**缺口 B**:`EnginePool::warmup()` 对每实例跑 dummy 推理(失败 warn 不阻断,与 yolo-rs 同款);`EngineManager::deep_health_check()` 对已加载引擎池实例 0 发 dummy 推理检测僵尸态(arena OOM 后 cuBLAS 永久失败);`/health?deep=true` 返回 `engine_health` 数组。**缺口 C**:`Config` 加 `acquire_timeout_ms`(默认 30000,0=fail-fast);`acquire_permit` 从 config 读超时,0 时 `try_acquire_owned()`。验证:`cargo build --jobs 6` 零警告;`cargo clippy --all-targets --jobs 6` 零警告;`cargo test --jobs 6` 89+1 全绿(config 5 新测试覆盖 gpu_mem_limit/acquire_timeout/fail-fast);rust-onnx-infer 95 测试全绿。 | 2026-09-10 |
 | 2 EngineManager 动态化(与 P2 重构合并,**批 1 收尾后才开始**) | ⬜ | | |
 | 3 HTTP 参数层(confidence 后过滤/batch/ROI) | ⬜ | | |
 | 4 A100 对标压测(yhpc,基线 500 QPS) | ⬜ | | |

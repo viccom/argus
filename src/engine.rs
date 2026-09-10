@@ -20,6 +20,41 @@ use rust_onnx_infer::OnnxInferenceEngine;
 use crate::config::Config;
 use crate::error::AppError;
 
+/// 深检结果:单个引擎的健康状态。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineHealth {
+    pub name: &'static str,
+    /// "ok" = dummy 推理成功;"degraded" = 失败(arena OOM 后 cuBLAS 永久失败等)
+    pub status: &'static str,
+    pub error: Option<String>,
+}
+
+/// 深检宏:对已加载引擎的池实例 0 发 dummy 推理,结果推入 results。
+/// 未加载引擎跳过(OnceCell::get 返回 None)。
+macro_rules! check_engine {
+    ($cell:expr, $name:literal, $ty:ty, $results:expr) => {
+        if let Some(pool) = $cell.get() {
+            let pool: &Arc<EnginePool<$ty>> = pool;
+            let (w, h) = pool.instances.first()
+                .map(|e| OnnxInferPredict::input_size(e.as_ref()))
+                .unwrap_or((640, 640));
+            let img = dummy_image(w, h);
+            let pool = Arc::clone(pool);
+            let status = tokio::task::spawn_blocking(move || {
+                pool.instances[0].predict(&img).map(|_| ())
+            })
+            .await
+            .map_err(|e| rust_onnx_infer::VisionError::inference(format!("深检任务失败: {e}")))
+            .and_then(|r| r);
+            $results.push(EngineHealth {
+                name: $name,
+                status: if status.is_ok() { "ok" } else { "degraded" },
+                error: status.err().map(|e| e.to_string()),
+            });
+        }
+    };
+}
+
 /// trait object 类型别名（缩短签名）。
 type DynFaceDet = Box<dyn OnnxInferenceEngine<Output = Vec<FaceDetectResult>>>;
 type DynPose = Box<dyn OnnxInferenceEngine<Output = Vec<PoseResult>>>;
@@ -85,6 +120,26 @@ impl EngineManager {
         loaded
     }
 
+    /// 深检:对每个已加载引擎的池实例 0 发 dummy 推理,返回健康状态数组。
+    ///
+    /// 动机:arena OOM 后 cuBLAS **永久失败**,浅检(端口活)完全不可见——僵尸态。
+    /// 仅在请求 `/health?deep=true` 时执行,不周期跑。未加载引擎不检查(无 session 可检)。
+    pub async fn deep_health_check(&self) -> Vec<EngineHealth> {
+        let mut results = Vec::new();
+        check_engine!(self.detection, "detection", DetectionEngine, results);
+        check_engine!(self.classification, "classification", ClassificationEngine, results);
+        check_engine!(self.obb, "obb", ObbDetectionEngine, results);
+        check_engine!(self.face_det, "face_detection", DynFaceDet, results);
+        check_engine!(self.face_rec, "face_recognition", FaceRecognitionEngine, results);
+        check_engine!(self.ocr, "ocr", OcrPipeline, results);
+        check_engine!(self.plate, "license_plate", LicensePlateEngine, results);
+        check_engine!(self.qr, "qr", QrDetector, results);
+        check_engine!(self.pose, "pose", DynPose, results);
+        check_engine!(self.depth, "depth", DynDepth, results);
+        check_engine!(self.human_parsing, "human_parsing", HumanParsingEngine, results);
+        results
+    }
+
     // ---- 各引擎懒加载入口 ----
 
     pub async fn detection(&self) -> Result<Arc<EnginePool<DetectionEngine>>, AppError> {
@@ -107,7 +162,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 detection 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("detection", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -133,7 +190,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 classification 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("classification", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -157,7 +216,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 obb 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("obb", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -183,7 +244,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 face_detection 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("face_detection", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -209,7 +272,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 face_recognition 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("face_recognition", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -239,7 +304,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 ocr 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("ocr", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -273,7 +340,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 license_plate 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("license_plate", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -297,7 +366,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 qr 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("qr", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -323,7 +394,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 pose 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("pose", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -347,7 +420,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 depth 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("depth", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -373,7 +448,9 @@ impl EngineManager {
                     engines.push(Arc::new(engine));
                 }
                 tracing::info!("引擎 human_parsing 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                Ok(Arc::new(EnginePool::new(engines)))
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("human_parsing", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
             })
             .await
             .cloned()
@@ -432,6 +509,41 @@ where
             .map_err(|e| AppError::Internal(format!("推理任务失败: {e}")))?
             .map_err(AppError::from)
     }
+
+    /// 启动预热:对池内**每个**实例跑一次 dummy 推理。
+    ///
+    /// 消除引擎反序列化 + cuDNN autotune 懒加载风暴,否则首个并发请求集体卡顿。
+    /// **失败告警不阻断**(标记冷启动,首请求延迟高可接受)——与 yolo-rs 同款语义。
+    ///
+    /// `dummy_fn` 接收 `&E`,返回 `Result<()>`;各引擎用自身 input_size 构造零张量。
+    pub async fn warmup<F>(&self, dummy_fn: F)
+    where
+        F: Fn(&E) -> rust_onnx_infer::Result<()> + Send + Sync + 'static,
+    {
+        let dummy_fn = Arc::new(dummy_fn);
+        for (idx, engine) in self.instances.iter().enumerate() {
+            let engine = Arc::clone(engine);
+            let dummy_fn = Arc::clone(&dummy_fn);
+            let t0 = std::time::Instant::now();
+            let result = tokio::task::spawn_blocking(move || dummy_fn(&engine))
+                .await
+                .map_err(|e| rust_onnx_infer::VisionError::inference(format!("预热任务失败: {e}")))
+                .and_then(|r| r);
+            match &result {
+                Ok(()) => tracing::info!(
+                    "引擎池实例 {}/{} 预热完成 ({:?})",
+                    idx + 1,
+                    self.instances.len(),
+                    t0.elapsed()
+                ),
+                Err(e) => tracing::warn!(
+                    "引擎池实例 {}/{} 预热失败(不阻断,首请求延迟可能偏高): {e}",
+                    idx + 1,
+                    self.instances.len()
+                ),
+            }
+        }
+    }
 }
 
 /// 在 spawn_blocking 中执行阻塞推理。
@@ -444,6 +556,72 @@ where
         .await
         .map_err(|e| AppError::Internal(format!("推理任务失败: {e}")))?
         .map_err(AppError::from)
+}
+
+/// 构造全零 dummy 图像(预热用)。
+fn dummy_image(w: i32, h: i32) -> rust_onnx_infer::Image {
+    // input_size 可能返回 -1(动态维度),回退 640
+    let w = if w > 0 { w as usize } else { 640 };
+    let h = if h > 0 { h as usize } else { 640 };
+    rust_onnx_infer::Image::new(w, h, 3)
+}
+
+/// 引擎预热 helper:从池中取实例 0 的 input_size 构造零张量,对池内每实例跑 dummy 推理。
+///
+/// `predict_fn` 接收 `&E` + `(width, height)`,返回 `Result<()>`。
+/// 失败 warn 不阻断(与 yolo-rs 同款语义)。
+async fn warmup_engine<E, F>(name: &str, pool: &EnginePool<E>, predict_fn: F)
+where
+    E: OnnxInferPredict + Send + Sync + 'static,
+    F: Fn(&E, i32, i32) -> rust_onnx_infer::Result<()> + Send + Sync + 'static,
+{
+    // 从实例 0 取 input_size(各实例同模型,size 一致)
+    let (w, h) = pool.instances.first()
+        .map(|e| e.input_size())
+        .unwrap_or((640, 640));
+    tracing::info!("引擎 {name} 预热开始 (dummy {w}x{h})");
+    pool.warmup(move |e| predict_fn(e, w, h)).await;
+}
+
+/// 引擎预热的 predict 能力 trait(具体类型和 trait object 都可实现)。
+trait OnnxInferPredict {
+    fn input_size(&self) -> (i32, i32);
+}
+
+// 为所有用到预热的引擎类型实现 trait(只暴露 input_size,predict 在闭包里直接调)
+impl OnnxInferPredict for DetectionEngine {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for ClassificationEngine {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for ObbDetectionEngine {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for FaceRecognitionEngine {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for LicensePlateEngine {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for QrDetector {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for HumanParsingEngine {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for OcrPipeline {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+// trait object 类型:Box<dyn OnnxInferenceEngine<Output=...>> 通过 deref 调用 trait 方法
+impl OnnxInferPredict for DynFaceDet {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self.as_ref()) }
+}
+impl OnnxInferPredict for DynPose {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self.as_ref()) }
+}
+impl OnnxInferPredict for DynDepth {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self.as_ref()) }
 }
 
 #[cfg(test)]

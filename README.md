@@ -46,6 +46,8 @@ cargo build --release --jobs 6
 | `VISION_EXT_MAX_CONCURRENT_INFERENCE` | 0 | 并发推理上限（0=不限） |
 | `VISION_EXT_ENGINE_POOL` | 1 | 每引擎实例池大小。>1 时同模型多实例并行推理（多路客户端同模型并发不再串行）。**代价**：内存 = 模型大小 × 池大小 × 已加载引擎数；CPU 预算 = 池大小 × 4（ORT 线程）× 引擎数 ≈ 核数。与多实例部署可叠加（实例数 × 池大小统算） |
 | `VISION_EXT_SHUTDOWN_TIMEOUT_SECS` | 10 | 优雅停机超时：SIGTERM 后等待在途请求的上限，超时强退。需覆盖最长推理（SAHI/depth ~1.5s，池化排队翻倍） |
+| `VISION_EXT_GPU_MEM_LIMIT_MB` | 0 | CUDA EP 显存上限（MB）。>0 时设置 ORT arena `with_memory_limit`，防 arena 无限膨胀导致 cuBLAS OOM 后永久失败（僵尸态）。0 = 不限（ORT 默认） |
+| `VISION_EXT_ACQUIRE_TIMEOUT_MS` | 30000 | 推理排队等待超时（ms）。全忙时请求等待引擎池 permit 的上限，超时返回 503。**0 = fail-fast**：不排队，全忙立即 503 |
 | `VISION_EXT_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `CLASSIFICATION` / `OBB` / `FACE_DET` / `FACE_REC` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`） |
 
 ## 模型下载
