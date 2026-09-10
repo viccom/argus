@@ -17,7 +17,7 @@
 | `POST /quality` | 图像质量评估（清晰度/亮度/对比度/噪声） | 无需模型 |
 | `POST /pose` | 人体姿态（COCO 17 关键点） | YOLOv8n-Pose |
 | `POST /depth` | 单目深度估计（min/max/mean + 64×64 预览） | Depth Anything V2 |
-| `POST /human-parsing` | 人体解析（部件占比） | PP-HumanSeg |
+| `POST /human-parsing` | 人体解析（ATR 18 类部件占比） | SegFormer-B2 |
 | `GET /health?deep=true` | 健康检查（浅检返回已加载引擎；deep=true 额外返回已配置能力清单） | — |
 | `GET /ui` | 内嵌 Web 控制台：浏览器拖拽图片、选择处理方式、可视化标注结果（页面免认证加载，API 调用仍需 key） | — |
 
@@ -64,7 +64,7 @@ cargo build --release --jobs 6
 | `wechat_qr_detect.onnx` | [opencv/opencv_contribution](https://huggingface.co/opencv/opencv_contribution) `wechat_qr/detect_2026april.onnx` **需图手术**：输入 384→416、按 416 重算 11 个 flatten shape 常量、裁掉 PriorBox×5 + DetectionOutput 尾层、输出改为 `mbox_loc [1,32448]` + `mbox_conf_flatten [1,16224]` |
 | `mnet_plate.onnx` / `Final_LPRNet_model.onnx` | [hpc203/license-plate-detect-recoginition-opencv](https://github.com/hpc203/license-plate-detect-recoginition-opencv) raw 直链 |
 | `depth_anything_v2_small.onnx` | [onnx-community/depth-anything-v2-small](https://huggingface.co/onnx-community/depth-anything-v2-small)（`onnx/model.onnx`） |
-| `pp_humanseg_2023mar.onnx` | [opencv/human_segmentation_pphumanseg](https://huggingface.co/opencv/human_segmentation_pphumanseg) |
+| `segformer_b2_clothes.onnx` | [mattmdjaga/segformer_b2_clothes](https://huggingface.co/mattmdjaga/segformer_b2_clothes)(`onnx/model.onnx`,110MB 全量) |
 
 ## 依赖说明
 
