@@ -6,7 +6,8 @@
 
 | 端点 | 说明 | 模型 |
 |---|---|---|
-| `POST /detect` | 目标检测（支持 SAHI 切片，`sahi=true`） | YOLO |
+| `POST /detect` | 目标检测（支持 SAHI 切片 `sahi=true`；请求级过滤 `confidence`/`target_classes`/`roi`，见下） | YOLO |
+| `POST /detect/batch` | 逐图批量检测（JSON `image_paths` 为**服务端本地路径**；单图失败带 `error` 不炸整批，每图独立背压 permit；过滤参数同 `/detect`） | YOLO |
 | `POST /classify` | 图像分类 Top-K（`top_k`，默认 5，上限 50） | YOLOv8n-CLS |
 | `POST /detect/obb` | 旋转框检测（自动识别传统 / End2End 布局） | YOLOv8n-OBB |
 | `POST /face/detect` | 人脸检测（bbox + 5 关键点） | YuNet |
@@ -22,6 +23,16 @@
 | `GET /ui` | 内嵌 Web 控制台：浏览器拖拽图片、选择处理方式、可视化标注结果（页面免认证加载，API 调用仍需 key） | — |
 
 所有模型按需懒加载（`tokio::OnceCell`），推理经 `spawn_blocking` + 信号量背压。
+
+### 检测请求级过滤（`/detect` multipart 文本字段，`/detect/batch` JSON 同名字段）
+
+| 参数 | 格式 | 语义 |
+|---|---|---|
+| `confidence` | `0.5`，范围 **[0.1, 1.0]**，默认 0.25 | 置信度阈值。引擎以 0.1 低阈值构造后按请求后过滤（类内 NMS 保序，与引擎直接以该阈值构造严格等价）；SAHI 路径在切片合并**前**过滤，避免低分碎片先放大高分框几何。低于 0.1 返回错误而非静默截断 |
+| `target_classes` | JSON 整数数组 `[0, 2, 5]`（class_id，非空） | 仅保留这些类别 |
+| `roi` | JSON 归一化多边形 `[[x,y],...]`，≥3 点，坐标 ∈ [0,1] | 仅保留 **bbox 中心点**落在多边形内的检测（射线法，支持凹多边形） |
+
+`/detect/batch` 的 `model` 参数在动态模型管理（吸收计划阶段 2）落地前传入即拒绝，不静默忽略。NMS IoU 全局固定 0.45（NMS 在引擎内完成，不做每请求覆盖）。
 
 ## 构建与运行
 

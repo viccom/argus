@@ -91,7 +91,8 @@ pub async fn service_info(
         "uptime_s": state.started_at.elapsed().as_secs(),
         "endpoints": {
             "GET /health": "健康检查",
-            "POST /detect": "目标检测（multipart: file/sahi/slice_w/slice_h/overlap）",
+            "POST /detect": "目标检测（multipart: file/sahi/slice_w/slice_h/overlap/confidence?/target_classes?/roi?）",
+            "POST /detect/batch": "批量检测（JSON: image_paths[服务端本地路径]/confidence?/target_classes?/roi?，逐图独立背压与错误隔离）",
             "POST /classify": "图像分类（multipart: file/top_k?）",
             "POST /detect/obb": "OBB 旋转框检测（multipart: file）",
             "POST /face/detect": "人脸检测（multipart: file）",
@@ -122,6 +123,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
         .route("/health", get(health))
         .route("/ui", get(crate::routes::ui::ui))
         .route("/detect", post(crate::routes::detection::detect))
+        .route("/detect/batch", post(crate::routes::batch::detect_batch))
         .route("/detect/obb", post(crate::routes::detection::detect_obb))
         .route("/classify", post(crate::routes::classification::classify))
         .route("/face/detect", post(crate::routes::face::face_detect))
@@ -246,19 +248,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_info_should_not_advertise_unsupported_confidence_param() {
-        // confidence 参数被解析但从未传入引擎（阈值在引擎构造时固定），
-        // 接口描述不应宣传未生效的参数
+    async fn service_info_should_advertise_detect_filter_params() {
+        // confidence/target_classes/roi 已是 /detect 生效参数(后过滤),接口描述须宣传;
+        // 历史上 confidence 曾被解析但未生效,当时的反向断言随实现落地翻转
         let app = build_router(test_state(), None);
         let resp = app
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let text = body_text(resp).await;
-        assert!(
-            !text.contains("confidence"),
-            "service_info 不应宣传未生效的 confidence 参数: {text}"
-        );
+        for p in ["confidence", "target_classes", "roi", "/detect/batch"] {
+            assert!(text.contains(p), "service_info 应宣传 {p}: {text}");
+        }
     }
 
     #[tokio::test]

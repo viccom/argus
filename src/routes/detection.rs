@@ -13,12 +13,13 @@ use rust_onnx_infer::OnnxInferenceEngine;
 
 use crate::error::AppError;
 use crate::routes::common::{acquire_permit, decode_image, field_text, parse_field_text};
+use crate::routes::detect_filter::{parse_target_classes, DetectFilter, Polygon};
 use crate::routes::health::AppState;
 
 // ---- DTO ----
 
 #[derive(Serialize)]
-struct DetectionDto {
+pub(crate) struct DetectionDto {
     class: String,
     class_id: i32,
     confidence: f64,
@@ -69,13 +70,17 @@ impl From<&ObbResult> for ObbDto {
 
 /// /detect 的 multipart 参数。
 ///
-/// 注：不支持运行时 confidence——阈值在引擎构造时固定（rust-onnx-infer 无按请求覆盖接口）。
+/// `confidence`/`target_classes`/`roi` 为请求级后过滤（语义见 `detect_filter`），
+/// 引擎以低阈值构造后按请求过滤，SAHI 路径经 `SahiConfig::min_confidence` 合并前过滤。
 struct DetectParams {
     file: Vec<u8>,
     sahi: bool,
     slice_w: Option<i32>,
     slice_h: Option<i32>,
     overlap: Option<f64>,
+    confidence: Option<f64>,
+    target_classes: Option<Vec<i32>>,
+    roi: Option<Polygon>,
 }
 
 async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams, AppError> {
@@ -84,6 +89,9 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
     let mut slice_w: Option<i32> = None;
     let mut slice_h: Option<i32> = None;
     let mut overlap: Option<f64> = None;
+    let mut confidence: Option<f64> = None;
+    let mut target_classes: Option<Vec<i32>> = None;
+    let mut roi: Option<Polygon> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -114,7 +122,22 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
             "overlap" => {
                 overlap = parse_field_text(&name, field).await?;
             }
-            _ => { /* 忽略未知字段（含历史 confidence） */ }
+            "confidence" => {
+                confidence = parse_field_text(&name, field).await?;
+            }
+            "target_classes" => {
+                let text = field_text(field).await?;
+                if !text.trim().is_empty() {
+                    target_classes = Some(parse_target_classes(&text)?);
+                }
+            }
+            "roi" => {
+                let text = field_text(field).await?;
+                if !text.trim().is_empty() {
+                    roi = Some(Polygon::parse(&text)?);
+                }
+            }
+            _ => { /* 忽略未知字段 */ }
         }
     }
 
@@ -125,18 +148,24 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
         slice_w,
         slice_h,
         overlap,
+        confidence,
+        target_classes,
+        roi,
     })
 }
 
 // ---- handlers ----
 
-/// POST /detect — 目标检测（可选 SAHI 切片）。
+/// POST /detect — 目标检测（可选 SAHI 切片 + 请求级 confidence/target_classes/roi 过滤）。
 pub async fn detect(
     State(state): State<AppState>,
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_detect_multipart(multipart).await?;
+    // 参数校验先于图像解码与引擎加载,非法参数不消耗推理资源
+    let filter = DetectFilter::new(params.confidence, params.target_classes, params.roi)?;
     let image = decode_image(params.file).await?;
+    let (img_w, img_h) = (image.width(), image.height());
 
     let pool = state.engines.detection().await?;
 
@@ -155,6 +184,8 @@ pub async fn detect(
             cfg.overlap_width_ratio = o;
             cfg.overlap_height_ratio = o;
         }
+        // 合并前过滤:与引擎直接以该阈值构造严格等价,避免低分碎片先放大高分框几何
+        cfg.min_confidence = Some(filter.confidence as f32);
         let result = pool
             .run(move |e| predict_sliced_detection(e, e, &image, &cfg))
             .await?;
@@ -164,10 +195,18 @@ pub async fn detect(
         (dets, None)
     };
     let elapsed = t0.elapsed().as_millis();
+    let detections = filter.apply(detections, img_w, img_h);
 
     let dtos: Vec<DetectionDto> = detections.iter().map(DetectionDto::from).collect();
     let count = dtos.len();
-    tracing::info!(endpoint = "detect", count, sahi = params.sahi, inference_ms = elapsed as u64, "推理完成");
+    tracing::info!(
+        endpoint = "detect",
+        count,
+        sahi = params.sahi,
+        confidence = filter.confidence,
+        inference_ms = elapsed as u64,
+        "推理完成"
+    );
 
     let mut data = json!({
         "detections": dtos,
@@ -256,6 +295,97 @@ mod tests {
              --{boundary}--\r\n"
         );
         body.into_bytes()
+    }
+
+    /// 1x1 有效 PNG + 任意文本字段的 multipart body。
+    fn multipart_png_with_fields(fields: &[(&str, &str)]) -> Vec<u8> {
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        let img_bytes = buf.into_inner();
+
+        let boundary = "----testboundary";
+        let mut full = Vec::new();
+        for (name, value) in fields {
+            full.extend_from_slice(
+                format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+                    .as_bytes(),
+            );
+        }
+        full.extend_from_slice(
+            format!(
+                "--{boundary}\r\n\
+                 Content-Disposition: form-data; name=\"file\"; filename=\"test.png\"\r\n\
+                 Content-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        full.extend_from_slice(&img_bytes);
+        full.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        full
+    }
+
+    async fn post_detect(body: Vec<u8>) -> String {
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(
+                Request::post("/detect")
+                    .header("content-type", "multipart/form-data; boundary=----testboundary")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        body_text(resp).await
+    }
+
+    #[tokio::test]
+    async fn detect_with_confidence_below_floor_returns_bad_request() {
+        // 校验先于引擎加载:未配模型也应报参数错误而非"模型未配置"
+        let text = post_detect(multipart_png_with_fields(&[("confidence", "0.05")])).await;
+        assert!(text.contains("error"), "{text}");
+        assert!(text.contains("0.1"), "应提示下限 0.1: {text}");
+        assert!(!text.contains("未配置"), "参数错误应先于模型检查: {text}");
+    }
+
+    #[tokio::test]
+    async fn detect_with_malformed_roi_returns_bad_request() {
+        let text = post_detect(multipart_png_with_fields(&[("roi", "0.1,0.1,0.9,0.9")])).await;
+        assert!(text.contains("error") && text.contains("roi"), "{text}");
+        let text = post_detect(multipart_png_with_fields(&[("roi", "[[0,0],[1,1]]")])).await;
+        assert!(text.contains("3 个点"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn detect_with_malformed_target_classes_returns_bad_request() {
+        let text = post_detect(multipart_png_with_fields(&[("target_classes", "person,car")])).await;
+        assert!(text.contains("error") && text.contains("target_classes"), "{text}");
+        let text = post_detect(multipart_png_with_fields(&[("target_classes", "[]")])).await;
+        assert!(text.contains("不能为空"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn detect_with_valid_filter_params_should_reach_engine() {
+        // 合法参数全部通过校验,走到引擎加载(未配模型 → 模型未配置错误,证明参数被接受)
+        let text = post_detect(multipart_png_with_fields(&[
+            ("confidence", "0.6"),
+            ("target_classes", "[0, 2]"),
+            ("roi", "[[0,0],[1,0],[1,1],[0,1]]"),
+        ]))
+        .await;
+        assert!(text.contains("未配置") || text.contains("model"), "应到达引擎加载: {text}");
+    }
+
+    #[tokio::test]
+    async fn detect_with_empty_optional_fields_should_be_treated_as_absent() {
+        // 前端表单常提交空字符串,须视为未传而非解析失败
+        let text = post_detect(multipart_png_with_fields(&[
+            ("confidence", ""),
+            ("target_classes", ""),
+            ("roi", ""),
+        ]))
+        .await;
+        assert!(text.contains("未配置") || text.contains("model"), "空字段应视为未传: {text}");
     }
 
     #[tokio::test]

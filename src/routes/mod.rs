@@ -1,6 +1,8 @@
 pub mod analysis;
+pub mod batch;
 pub mod classification;
 pub mod common;
+pub mod detect_filter;
 pub mod detection;
 pub mod face;
 pub mod health;

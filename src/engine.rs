@@ -20,6 +20,21 @@ use rust_onnx_infer::OnnxInferenceEngine;
 use crate::config::Config;
 use crate::error::AppError;
 
+/// 检测引擎构造阈值(下限)。引擎是 Arc 共享不可变,每请求 `confidence` 在 HTTP 层
+/// 后过滤(类内 NMS 保序:低阈值结果是任意高阈值结果的超集,后过滤严格等价)。
+///
+/// **必须 ≥ `SahiConfig::LOW_MODEL_CONFIDENCE`(0.1)**,否则 SAHI postprocess 自动切换
+/// NMS/IOU 改变合并语义(有测试锁定)。
+pub const DETECTION_CONFIDENCE_FLOOR: f32 = 0.10;
+/// 检测 NMS IoU 阈值(全局,不做每请求覆盖——NMS 在引擎内完成,重做等于绕过引擎后处理)。
+pub const DETECTION_NMS_IOU: f32 = 0.45;
+
+// 编译期锁定:下限低于 LOW_MODEL_CONFIDENCE 会让 SAHI 路径行为静默漂移
+const _: () = assert!(
+    DETECTION_CONFIDENCE_FLOOR >= rust_onnx_infer::sahi::config::SahiConfig::LOW_MODEL_CONFIDENCE,
+    "DETECTION_CONFIDENCE_FLOOR 必须 >= SahiConfig::LOW_MODEL_CONFIDENCE"
+);
+
 /// 深检结果:单个引擎的健康状态。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineHealth {
@@ -155,7 +170,7 @@ impl EngineManager {
                 for _ in 0..pool_size {
                     let p = path.clone();
                     let engine = tokio::task::spawn_blocking(move || {
-                        DetectionEngine::for_yolo(&p, device, 0.25, 0.45)
+                        DetectionEngine::for_yolo(&p, device, DETECTION_CONFIDENCE_FLOOR, DETECTION_NMS_IOU)
                     })
                     .await
                     .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
