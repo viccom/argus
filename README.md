@@ -31,7 +31,7 @@ cargo build --release --jobs 6
 运行时需 ORT 动态库（`load-dynamic`）与模型文件，环境变量见下。
 
 版本标识由 build.rs 编译期探测注入（git hash + dirty 标记），见 `/health` 的 `version` 字段。
-`SIGTERM`/`Ctrl+C` 触发优雅停机：等待在途请求完成后退出（60s 超时保底强退）。
+`SIGTERM`/`Ctrl+C` 触发优雅停机：等待在途请求完成后退出（`VISION_EXT_SHUTDOWN_TIMEOUT_SECS` 超时保底强退，默认 10s）。
 
 ## 配置（环境变量）
 

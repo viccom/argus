@@ -85,8 +85,10 @@ struct DepthDto {
     max: f32,
     /// 平均深度值
     mean: f32,
-    /// 下采样后的深度值（最多 64x64，用于可视化预览）
+    /// 下采样后的深度值（最多 64x64，行优先 [行][列]，用于可视化预览）
     preview: Vec<f32>,
+    /// preview 的列数（前端按 [行][列] 重建网格必需；非方形网格不能从 len 推断）
+    preview_cols: usize,
 }
 
 impl From<&FloatMask> for DepthDto {
@@ -142,6 +144,7 @@ impl From<&FloatMask> for DepthDto {
             min,
             max,
             mean,
+            preview_cols: w.div_ceil(step_w),
             preview,
         }
     }
@@ -580,6 +583,17 @@ mod tests {
         // 128 / 64 向上取整步长 = 2, preview 应为 64*64
         assert!(dto.preview.len() <= 64 * 64);
         assert!(!dto.preview.is_empty());
+        assert_eq!(dto.preview_cols, 64, "128 宽 / 步长2 = 64 列");
+    }
+
+    #[test]
+    fn depth_dto_should_report_exact_grid_for_non_square_image() {
+        // 生产实测尺寸(bus.jpg 810x1080):步长 13x17 → 网格 63 列 × 64 行。
+        // preview_cols 必须显式给出——前端曾用 sqrt(len) 猜列数得到 64(错),热图错切。
+        let mask = FloatMask::from_raw(810, 1080, vec![0.4; 810 * 1080]).unwrap();
+        let dto = DepthDto::from(&mask);
+        assert_eq!(dto.preview_cols, 63);
+        assert_eq!(dto.preview.len(), 63 * 64);
     }
 
     #[test]

@@ -14,6 +14,10 @@ pub struct Config {
     /// 注意:对全部已加载引擎生效——内存代价为 模型大小 × 池大小 × 已加载引擎数,
     /// 且 池大小 × 每实例 ORT 线程数(默认 4)应 ≈ 可用核数。
     pub engine_pool: usize,
+    /// 优雅停机超时(秒):SIGTERM 后等待在途请求的上限,超时强制退出。
+    /// 需覆盖最长推理(SAHI/depth 单次 ~1.5s,池化排队可翻倍),默认 10s;
+    /// 过大(如旧值 60)在浏览器 keep-alive 不关闭时白白拉长停机窗口。
+    pub shutdown_timeout_secs: u64,
     /// 检测模型路径（YOLO/RT-DETR/RF-DETR）。None 则 /detect 返回未配置错误。
     pub detection_model: Option<PathBuf>,
     /// OBB 模型路径。
@@ -54,6 +58,7 @@ impl Default for Config {
             engine_pool: 1,
             detection_model: None,
             obb_model: None,
+            shutdown_timeout_secs: 10,
             face_det_model: None,
             face_rec_model: None,
             ocr_det_model: None,
@@ -107,6 +112,11 @@ impl Config {
 
         cfg.detection_model = env_path("VISION_EXT_DETECTION_MODEL");
         cfg.obb_model = env_path("VISION_EXT_OBB_MODEL");
+        if let Ok(v) = env::var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.shutdown_timeout_secs = n.max(1);
+            }
+        }
         cfg.face_det_model = env_path("VISION_EXT_FACE_DET_MODEL");
         cfg.face_rec_model = env_path("VISION_EXT_FACE_REC_MODEL");
         cfg.ocr_det_model = env_path("VISION_EXT_OCR_DET_MODEL");
@@ -169,11 +179,26 @@ mod tests {
         assert!(config.ocr_det_model.is_none());
     }
 
+        assert_eq!(config.engine_pool, 1);
+        assert_eq!(config.shutdown_timeout_secs, 10);
     #[test]
     fn from_env_should_override_defaults() {
         let _guard = env_lock();
         unsafe {
             env::set_var("VISION_EXT_PORT", "8080");
+    #[test]
+    fn from_env_should_override_shutdown_timeout() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS", "30");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.shutdown_timeout_secs, 30);
+        unsafe {
+            env::remove_var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS");
+        }
+    }
+
             env::set_var("VISION_EXT_DEVICE", "CUDA");
             env::set_var("VISION_EXT_AUTH_TOKEN", "secret-key-123");
             env::set_var("VISION_EXT_DETECTION_MODEL", "/models/yolo.onnx");

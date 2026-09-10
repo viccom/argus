@@ -488,8 +488,9 @@ function drawPoses(poses) {
 }
 
 function drawDepth(depth) {
-  // preview 为最多 64×64 的行优先深度值,渲染为灰度热图覆盖在图上(半透明)
-  const pv = depth.preview, cols = Math.ceil(Math.sqrt(pv.length));
+  // preview 为行优先 [行][列] 网格,列数由后端 preview_cols 显式给出
+  // (非方形网格不能从 len 用 sqrt 猜——曾因此错切热图)
+  const pv = depth.preview, cols = depth.preview_cols || Math.ceil(Math.sqrt(pv.length));
   const rows = Math.ceil(pv.length / cols);
   const tmp = document.createElement("canvas");
   tmp.width = cols; tmp.height = rows;

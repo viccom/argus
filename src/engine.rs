@@ -366,16 +366,12 @@ where
     E: Send + Sync + 'static,
 {
     pub fn new(instances: Vec<Arc<E>>) -> Self {
-        let n = instances.len().max(1);
+        // run() 以实例数取模分发,空池会除零——在构造边界显式失败
+        assert!(!instances.is_empty(), "EnginePool 至少需要一个实例");
         EnginePool {
             instances,
-            permits: Arc::new(tokio::sync::Semaphore::new(n)),
             next: std::sync::atomic::AtomicUsize::new(0),
         }
-    }
-
-    pub fn size(&self) -> usize {
-        self.instances.len()
     }
 
     /// 取一个实例执行闭包(闭包收到 `&E`)。排队上限 = 池大小,全忙时在信号量上等待。
@@ -398,6 +394,7 @@ where
             .await
             .map_err(|e| AppError::Internal(format!("推理任务失败: {e}")))?
             .map_err(AppError::from)
+            permits: Arc::new(tokio::sync::Semaphore::new(instances.len())),
     }
 }
 
@@ -523,3 +520,10 @@ mod tests {
         assert!(matches!(err, AppError::Inference(_)), "实际: {err:?}");
     }
 }
+
+    #[test]
+    #[should_panic(expected = "EnginePool 至少需要一个实例")]
+    fn empty_pool_should_panic_with_clear_message() {
+        // 空池防御:run() 的取模运算在 len=0 时除零,必须在构造边界显式失败
+        let _ = EnginePool::<usize>::new(vec![]);
+    }

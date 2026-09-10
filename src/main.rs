@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("已配置模型能力: {:?}", config.configured_engines());
 
     let engines = engine::EngineManager::new(config.clone());
+    let shutdown_timeout = std::time::Duration::from_secs(config.shutdown_timeout_secs);
     let state = AppState::new(config, engines);
 
     let app = build_router(state, auth_token);
@@ -39,14 +40,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("vision-ext 监听 http://0.0.0.0:{port}");
 
-    // 优雅停机：SIGINT/SIGTERM 后停止接受新连接，等待在途请求（含长推理）完成；
-    // 超时保底强退，防止个别悬挂连接导致进程无法退出。
-    // 超时取 3s：浏览器 keep-alive 连接不会主动关闭，长超时只会拉长停机窗口
-    //（共享机上被外部周期性终止时，60s 等待意味着每轮 1 分钟不可用）。
+    // 优雅停机：SIGINT/SIGTERM 后停止接受新连接，等待在途请求（含长推理）完成。
+    // 超时上限可配（VISION_EXT_SHUTDOWN_TIMEOUT_SECS，默认 10s）：需覆盖最长推理
+    // （SAHI/depth ~1.5s，池化排队翻倍），又不能过大——浏览器 keep-alive 连接
+    // 不会主动关闭，过大的超时只会拉长停机窗口（旧值 60s 即此问题）。
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
-    match tokio::time::timeout(std::time::Duration::from_secs(3), server).await {
+    match tokio::time::timeout(shutdown_timeout, server).await {
         Ok(result) => result?,
-        Err(_) => tracing::error!("优雅停机超时（60s），强制退出"),
+        Err(_) => tracing::error!(
+            "优雅停机超时（{}s），强制退出",
+            shutdown_timeout.as_secs()
+        ),
     }
     tracing::info!("vision-ext 已停止 ({})", crate::version::version_string());
 
