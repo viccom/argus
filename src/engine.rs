@@ -260,7 +260,13 @@ impl EngineManager {
                 for _ in 0..pool_size {
                     let (d, r) = (det.clone(), rec.clone());
                     let engine = tokio::task::spawn_blocking(move || {
-                        LicensePlateEngine::new(&d, &r, device)
+                        // 车牌检测阈值 0.15(引擎默认 0.5 过严):多车牌拼图/远景
+                        // 小牌 det 分常低于 0.5(chepai-1 实测 8 牌:0.5→1 个,
+                        // 0.15→6 个,余下为极小/模糊牌属模型能力边界)。LPRNet
+                        // 另有 rec 分,垃圾候选总 score 低可辨识
+                        let mut e = LicensePlateEngine::new(&d, &r, device)?;
+                        e.base.set_confidence_threshold(0.15);
+                        Ok::<_, rust_onnx_infer::VisionError>(e)
                     })
                     .await
                     .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;

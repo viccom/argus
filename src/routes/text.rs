@@ -141,6 +141,10 @@ pub async fn ocr(
 }
 
 /// POST /license-plate — 车牌识别。
+///
+/// 大图（最长边 > 1280，如多车牌拼图/远景停车场）自动走 SAHI 切片识别：
+/// mnet 检测输入固定 640，整图直接缩放会物理丢失小牌（实测 2483×1902 拼图
+/// 9 牌整图仅检 6，降检测阈值至 0.05 只增假阳性不增真牌）。小图零开销不受影响。
 pub async fn license_plate(
     State(state): State<AppState>,
     multipart: Multipart,
@@ -152,18 +156,25 @@ pub async fn license_plate(
     let _permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
-    let results = pool.run(move |e| e.recognize(&image)).await?;
+    const SLICE_AUTO_THRESHOLD: usize = 1280;
+    let sliced = image.width().max(image.height()) > SLICE_AUTO_THRESHOLD;
+    let results = if sliced {
+        pool.run(move |e| e.recognize_sliced(&image, 640, 0.2)).await?
+    } else {
+        pool.run(move |e| e.recognize(&image)).await?
+    };
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<PlateDto> = results.iter().map(PlateDto::from).collect();
     let count = dtos.len();
-    tracing::info!(endpoint = "license_plate", count, inference_ms = elapsed as u64, "推理完成");
+    tracing::info!(endpoint = "license_plate", count, sliced, inference_ms = elapsed as u64, "推理完成");
 
     Ok(Json(json!({
         "status": "ok",
         "data": {
             "plates": dtos,
             "count": count,
+            "sliced": sliced,
             "inference_ms": elapsed,
         }
     })))
