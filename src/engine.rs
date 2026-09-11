@@ -178,7 +178,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 detection 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("detection", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("detection", &pool, self.config.warmup_size_for("detection"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -206,7 +206,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 classification 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("classification", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("classification", &pool, self.config.warmup_size_for("classification"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -232,7 +232,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 obb 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("obb", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("obb", &pool, self.config.warmup_size_for("obb"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -260,7 +260,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 face_detection 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("face_detection", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("face_detection", &pool, self.config.warmup_size_for("face_detection"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -288,7 +288,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 face_recognition 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("face_recognition", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("face_recognition", &pool, self.config.warmup_size_for("face_recognition"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -320,7 +320,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 ocr 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("ocr", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("ocr", &pool, self.config.warmup_size_for("ocr"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -356,7 +356,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 license_plate 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("license_plate", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("license_plate", &pool, self.config.warmup_size_for("license_plate"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -382,7 +382,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 qr 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("qr", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("qr", &pool, self.config.warmup_size_for("qr"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -410,7 +410,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 pose 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("pose", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("pose", &pool, self.config.warmup_size_for("pose"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -436,7 +436,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 depth 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("depth", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("depth", &pool, self.config.warmup_size_for("depth"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -464,7 +464,7 @@ impl EngineManager {
                 }
                 tracing::info!("引擎 human_parsing 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("human_parsing", &pool, |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                warmup_engine("human_parsing", &pool, self.config.warmup_size_for("human_parsing"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -581,18 +581,27 @@ fn dummy_image(w: i32, h: i32) -> rust_onnx_infer::Image {
     rust_onnx_infer::Image::new(w, h, 3)
 }
 
-/// 引擎预热 helper:从池中取实例 0 的 input_size 构造零张量,对池内每实例跑 dummy 推理。
+/// 引擎预热 helper:构造零张量,对池内每实例跑 dummy 推理。
+///
+/// `override_size` 覆盖 dummy 尺寸(来自 `VISION_EXT_<CAP>_WARMUP_SIZE`),None 沿用
+/// 引擎 `input_size`。OCR 必须用小图:960 全零 dummy 实测 20.4s/实例(det 大量伪区域
+/// + rec 批前向),320 小图 0.43s/实例,首个真实请求推理不变。
 ///
 /// `predict_fn` 接收 `&E` + `(width, height)`,返回 `Result<()>`。
 /// 失败 warn 不阻断(与 yolo-rs 同款语义)。
-async fn warmup_engine<E, F>(name: &str, pool: &EnginePool<E>, predict_fn: F)
-where
+async fn warmup_engine<E, F>(
+    name: &str,
+    pool: &EnginePool<E>,
+    override_size: Option<(u32, u32)>,
+    predict_fn: F,
+) where
     E: OnnxInferPredict + Send + Sync + 'static,
     F: Fn(&E, i32, i32) -> rust_onnx_infer::Result<()> + Send + Sync + 'static,
 {
-    // 从实例 0 取 input_size(各实例同模型,size 一致)
-    let (w, h) = pool.instances.first()
-        .map(|e| e.input_size())
+    // 覆盖优先;否则从实例 0 取 input_size(各实例同模型,size 一致)
+    let (w, h) = override_size
+        .map(|(w, h)| (w as i32, h as i32))
+        .or_else(|| pool.instances.first().map(|e| e.input_size()))
         .unwrap_or((640, 640));
     tracing::info!("引擎 {name} 预热开始 (dummy {w}x{h})");
     pool.warmup(move |e| predict_fn(e, w, h)).await;

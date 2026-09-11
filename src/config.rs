@@ -1,5 +1,14 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+
+/// 能力键全集（规范名，与 `/models`、`EngineManager::list_loaded`、`configured_engines`
+/// 一致）。按能力覆盖的 env（预热尺寸、池大小等）一律以能力键大写为后缀，
+/// 不引入第三套命名；与模型路径 env（`FACE_DET` 等）的差异在 README 记录。
+pub const CAPABILITY_KEYS: [&str; 11] = [
+    "detection", "classification", "obb", "face_detection", "face_recognition",
+    "ocr", "license_plate", "qr", "pose", "depth", "human_parsing",
+];
 
 /// 服务配置。所有字段均可通过环境变量覆盖（前缀 VISION_EXT_）。
 #[derive(Clone, Debug)]
@@ -55,6 +64,11 @@ pub struct Config {
     pub depth_model: Option<PathBuf>,
     /// 人体解析模型路径。
     pub human_parsing_model: Option<PathBuf>,
+    /// 每能力预热 dummy 输入尺寸覆盖（`VISION_EXT_<CAP>_WARMUP_SIZE=WxH`）。
+    /// 未设置的能力沿用引擎 `input_size`。背景：OCR 预热在引擎默认的 960×960
+    /// 全零 dummy 上为 20.4s/实例（det 对大块零图产出大量伪区域 + rec 批前向），
+    /// 320×320 小图实测 0.43s/实例，首个真实请求推理耗时不变（2026-09-11 实测）。
+    pub warmup_sizes: HashMap<String, (u32, u32)>,
 }
 
 impl Default for Config {
@@ -84,6 +98,7 @@ impl Default for Config {
             pose_model: None,
             depth_model: None,
             human_parsing_model: None,
+            warmup_sizes: HashMap::new(),
         }
     }
 }
@@ -154,7 +169,21 @@ impl Config {
         cfg.depth_model = env_path("VISION_EXT_DEPTH_MODEL");
         cfg.human_parsing_model = env_path("VISION_EXT_HUMAN_PARSING_MODEL");
 
+        for cap in CAPABILITY_KEYS {
+            if let Some(size) = env::var(format!("VISION_EXT_{}_WARMUP_SIZE", cap.to_uppercase()))
+                .ok()
+                .and_then(|v| parse_wxh(&v))
+            {
+                cfg.warmup_sizes.insert(cap.to_string(), size);
+            }
+        }
+
         cfg
+    }
+
+    /// 预热 dummy 输入尺寸覆盖；`None` = 沿用引擎 `input_size`（默认行为）。
+    pub fn warmup_size_for(&self, capability: &str) -> Option<(u32, u32)> {
+        self.warmup_sizes.get(capability).copied()
     }
 
     /// 列出已配置模型路径的引擎能力名（deep health 与启动日志用）。
@@ -178,6 +207,12 @@ impl Config {
 
 fn env_path(key: &str) -> Option<PathBuf> {
     env::var(key).ok().filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// 解析 `WxH` 形式的尺寸（如 `320x320`）；非法值返回 None（回退引擎默认）。
+fn parse_wxh(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
 #[cfg(test)]
@@ -324,6 +359,65 @@ mod tests {
         assert!(config.auth_token.is_none());
         unsafe {
             env::remove_var("VISION_EXT_AUTH_TOKEN");
+        }
+    }
+
+    // ---- 预热输入尺寸（§3.1：按能力可覆盖，dummy 尺寸是 OCR 预热 80s 的主因） ----
+
+    #[test]
+    fn from_env_should_parse_ocr_warmup_size() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_OCR_WARMUP_SIZE", "320x320");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.warmup_size_for("ocr"),
+            Some((320, 320)),
+            "OCR 预热应用小图 dummy，避免 960 全零图触发大量伪区域"
+        );
+        unsafe {
+            env::remove_var("VISION_EXT_OCR_WARMUP_SIZE");
+        }
+    }
+
+    #[test]
+    fn warmup_size_should_default_to_engine_input_size_when_unset() {
+        let config = Config::from_env();
+        assert_eq!(
+            config.warmup_size_for("ocr"),
+            None,
+            "未设置时预热沿用引擎 input_size，行为与改动前一致"
+        );
+    }
+
+    #[test]
+    fn warmup_size_should_be_per_capability() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_OCR_WARMUP_SIZE", "320x320");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.warmup_size_for("depth"),
+            None,
+            "OCR 的覆盖不得泄漏到其他能力"
+        );
+        unsafe {
+            env::remove_var("VISION_EXT_OCR_WARMUP_SIZE");
+        }
+    }
+
+    #[test]
+    fn from_env_should_ignore_malformed_warmup_size() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_OCR_WARMUP_SIZE", "abc");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.warmup_size_for("ocr"), None, "非法值应回退默认");
+        unsafe {
+            env::remove_var("VISION_EXT_OCR_WARMUP_SIZE");
         }
     }
 }
