@@ -69,6 +69,10 @@ pub struct Config {
     /// 全零 dummy 上为 20.4s/实例（det 对大块零图产出大量伪区域 + rec 批前向），
     /// 320×320 小图实测 0.43s/实例，首个真实请求推理耗时不变（2026-09-11 实测）。
     pub warmup_sizes: HashMap<String, (u32, u32)>,
+    /// 每能力实例池大小覆盖（`VISION_EXT_<CAP>_POOL`），未设置回退全局 `engine_pool`。
+    /// 背景：内存被 ORT 每 session 运行时开销主导，ocr + human_parsing 两项占全量
+    /// 83%（12.4GB 中 ~10.3GB）；把这两项与 depth 设 1 即可拿回大部分内存。
+    pub pools: HashMap<String, usize>,
 }
 
 impl Default for Config {
@@ -99,6 +103,7 @@ impl Default for Config {
             depth_model: None,
             human_parsing_model: None,
             warmup_sizes: HashMap::new(),
+            pools: HashMap::new(),
         }
     }
 }
@@ -176,6 +181,15 @@ impl Config {
             {
                 cfg.warmup_sizes.insert(cap.to_string(), size);
             }
+            // 池 0 会构造空实例池（EnginePool 构造 panic），非数字解析失败——
+            // 两者都视为未设置，回退全局
+            if let Some(n) = env::var(format!("VISION_EXT_{}_POOL", cap.to_uppercase()))
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n >= 1)
+            {
+                cfg.pools.insert(cap.to_string(), n);
+            }
         }
 
         cfg
@@ -184,6 +198,11 @@ impl Config {
     /// 预热 dummy 输入尺寸覆盖；`None` = 沿用引擎 `input_size`（默认行为）。
     pub fn warmup_size_for(&self, capability: &str) -> Option<(u32, u32)> {
         self.warmup_sizes.get(capability).copied()
+    }
+
+    /// 能力级实例池大小；未设置（或非法）回退全局 `engine_pool`。
+    pub fn pool_for(&self, capability: &str) -> usize {
+        self.pools.get(capability).copied().unwrap_or(self.engine_pool)
     }
 
     /// 列出已配置模型路径的引擎能力名（deep health 与启动日志用）。
@@ -418,6 +437,77 @@ mod tests {
         assert_eq!(config.warmup_size_for("ocr"), None, "非法值应回退默认");
         unsafe {
             env::remove_var("VISION_EXT_OCR_WARMUP_SIZE");
+        }
+    }
+
+    // ---- 单能力独立设池（§3.2：VISION_EXT_<CAP>_POOL 覆盖全局 ENGINE_POOL） ----
+
+    #[test]
+    fn pool_for_should_fall_back_to_global_when_per_cap_unset() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ENGINE_POOL", "4");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.pool_for("ocr"),
+            4,
+            "未设置能力级池时必须回退全局 engine_pool（零回归默认）"
+        );
+        unsafe {
+            env::remove_var("VISION_EXT_ENGINE_POOL");
+        }
+    }
+
+    #[test]
+    fn per_cap_pool_should_override_global_pool() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ENGINE_POOL", "4");
+            env::set_var("VISION_EXT_OCR_POOL", "1");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.pool_for("ocr"), 1,
+            "OCR/HUMAN_PARSING/DEPTH 池=1 是内存止血的关键杠杆（12.4GB→约 4GB）"
+        );
+        unsafe {
+            env::remove_var("VISION_EXT_ENGINE_POOL");
+            env::remove_var("VISION_EXT_OCR_POOL");
+        }
+    }
+
+    #[test]
+    fn per_cap_pool_should_not_leak_to_other_capabilities() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ENGINE_POOL", "4");
+            env::set_var("VISION_EXT_OCR_POOL", "1");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.pool_for("depth"), 4, "OCR 的覆盖不得影响 depth");
+        unsafe {
+            env::remove_var("VISION_EXT_ENGINE_POOL");
+            env::remove_var("VISION_EXT_OCR_POOL");
+        }
+    }
+
+    #[test]
+    fn per_cap_pool_of_zero_or_garbage_should_fall_back_to_global() {
+        // 池 0 会构造空实例池（EnginePool 构造 panic），必须挡在解析层回退全局
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ENGINE_POOL", "2");
+            env::set_var("VISION_EXT_DEPTH_POOL", "0");
+            env::set_var("VISION_EXT_HUMAN_PARSING_POOL", "x");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.pool_for("depth"), 2, "0 非法，回退全局");
+        assert_eq!(config.pool_for("human_parsing"), 2, "非数字非法，回退全局");
+        unsafe {
+            env::remove_var("VISION_EXT_ENGINE_POOL");
+            env::remove_var("VISION_EXT_DEPTH_POOL");
+            env::remove_var("VISION_EXT_HUMAN_PARSING_POOL");
         }
     }
 }

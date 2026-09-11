@@ -165,7 +165,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("detection");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -193,7 +193,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("classification");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -221,7 +221,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("obb");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -247,7 +247,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("face_detection");
                 let mut engines: Vec<Arc<DynFaceDet>> = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -275,7 +275,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("face_recognition");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -307,7 +307,7 @@ impl EngineManager {
                 let model_display = format!("{} + {}", det.display(), rec.display());
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("ocr");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let (d, r, dc) = (det.clone(), rec.clone(), dict.clone());
@@ -337,7 +337,7 @@ impl EngineManager {
                 let model_display = format!("{} + {}", det.display(), rec.display());
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("license_plate");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let (d, r) = (det.clone(), rec.clone());
@@ -371,7 +371,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("qr");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -397,7 +397,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("pose");
                 let mut engines: Vec<Arc<DynPose>> = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -425,7 +425,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("depth");
                 let mut engines: Vec<Arc<DynDepth>> = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
@@ -451,7 +451,7 @@ impl EngineManager {
                 let model_display = path.display().to_string();
                 let t0 = std::time::Instant::now();
                 let device = self.device;
-                let pool_size = self.config.engine_pool;
+                let pool_size = self.config.pool_for("human_parsing");
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let p = path.clone();
