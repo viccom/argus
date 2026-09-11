@@ -20,6 +20,7 @@
 | `POST /depth` | 单目深度估计（min/max/mean + 64×64 预览） | Depth Anything V2 |
 | `POST /human-parsing` | 人体解析（ATR 18 类部件占比） | SegFormer-B2 |
 | `GET /health?deep=true` | 健康检查（浅检返回已加载引擎；deep=true 额外返回已配置能力清单） | — |
+| `GET /models` | 能力键控的模型清单（`configured`/`loaded`/`models`）。**注意与 yolo-rs 同名端点语义不同**：yolo-rs 是目录扫描（任意 *.onnx 即可用），本服务 models/ 混装异构模型，故按能力键控；消费方取 `data.capabilities.detection.models` 得目标检测可用模型名 | — |
 | `GET /ui` | 内嵌 Web 控制台：浏览器拖拽图片、选择处理方式、可视化标注结果（页面免认证加载，API 调用仍需 key） | — |
 
 所有模型按需懒加载（`tokio::OnceCell`），推理经 `spawn_blocking` + 信号量背压。

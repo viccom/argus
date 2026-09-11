@@ -6,5 +6,6 @@ pub mod detect_filter;
 pub mod detection;
 pub mod face;
 pub mod health;
+pub mod models;
 pub mod text;
 pub mod ui;

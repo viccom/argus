@@ -91,6 +91,7 @@ pub async fn service_info(
         "uptime_s": state.started_at.elapsed().as_secs(),
         "endpoints": {
             "GET /health": "健康检查",
+            "GET /models": "能力键控的模型清单（configured/loaded/models，每能力实际使用的模型文件名）",
             "POST /detect": "目标检测（multipart: file/sahi/slice_w/slice_h/overlap/confidence?/target_classes?/roi?）",
             "POST /detect/batch": "批量检测（JSON: image_paths[服务端本地路径]/confidence?/target_classes?/roi?，逐图独立背压与错误隔离）",
             "POST /classify": "图像分类（multipart: file/top_k?）",
@@ -121,6 +122,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
     axum::Router::new()
         .route("/", get(service_info))
         .route("/health", get(health))
+        .route("/models", get(crate::routes::models::list_models))
         .route("/ui", get(crate::routes::ui::ui))
         .route("/detect", post(crate::routes::detection::detect))
         .route("/detect/batch", post(crate::routes::batch::detect_batch))
