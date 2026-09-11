@@ -118,6 +118,16 @@ impl EngineManager {
         }
     }
 
+    /// 白名单强制点(§3.3):不在 `VISION_EXT_ENABLED_CAPABILITIES` 白名单的能力,
+    /// 在读取模型路径/触碰文件系统之前即拒绝,与"模型未配置"区分。
+    fn ensure_enabled(&self, capability: &str) -> Result<(), AppError> {
+        if self.config.capability_enabled(capability) {
+            Ok(())
+        } else {
+            Err(AppError::CapabilityDisabled(capability.into()))
+        }
+    }
+
     /// 列出已加载的引擎名。
     pub fn list_loaded(&self) -> Vec<&'static str> {
         let mut loaded = Vec::new();
@@ -160,6 +170,7 @@ impl EngineManager {
     pub async fn detection(&self) -> Result<Arc<EnginePool<DetectionEngine>>, AppError> {
         self.detection
             .get_or_try_init(|| async {
+                self.ensure_enabled("detection")?;
                 let path = self.config.detection_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("detection".into()))?;
                 let model_display = path.display().to_string();
@@ -188,6 +199,7 @@ impl EngineManager {
     pub async fn classification(&self) -> Result<Arc<EnginePool<ClassificationEngine>>, AppError> {
         self.classification
             .get_or_try_init(|| async {
+                self.ensure_enabled("classification")?;
                 let path = self.config.classification_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("classification".into()))?;
                 let model_display = path.display().to_string();
@@ -216,6 +228,7 @@ impl EngineManager {
     pub async fn obb(&self) -> Result<Arc<EnginePool<ObbDetectionEngine>>, AppError> {
         self.obb
             .get_or_try_init(|| async {
+                self.ensure_enabled("obb")?;
                 let path = self.config.obb_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("obb".into()))?;
                 let model_display = path.display().to_string();
@@ -242,6 +255,7 @@ impl EngineManager {
     pub async fn face_detection(&self) -> Result<Arc<EnginePool<DynFaceDet>>, AppError> {
         self.face_det
             .get_or_try_init(|| async {
+                self.ensure_enabled("face_detection")?;
                 let path = self.config.face_det_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("face_detection".into()))?;
                 let model_display = path.display().to_string();
@@ -270,6 +284,7 @@ impl EngineManager {
     pub async fn face_recognition(&self) -> Result<Arc<EnginePool<FaceRecognitionEngine>>, AppError> {
         self.face_rec
             .get_or_try_init(|| async {
+                self.ensure_enabled("face_recognition")?;
                 let path = self.config.face_rec_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("face_recognition".into()))?;
                 let model_display = path.display().to_string();
@@ -298,6 +313,7 @@ impl EngineManager {
     pub async fn ocr(&self) -> Result<Arc<EnginePool<OcrPipeline>>, AppError> {
         self.ocr
             .get_or_try_init(|| async {
+                self.ensure_enabled("ocr")?;
                 let det = self.config.ocr_det_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("ocr".into()))?;
                 let rec = self.config.ocr_rec_model.clone()
@@ -330,6 +346,7 @@ impl EngineManager {
     pub async fn license_plate(&self) -> Result<Arc<EnginePool<LicensePlateEngine>>, AppError> {
         self.plate
             .get_or_try_init(|| async {
+                self.ensure_enabled("license_plate")?;
                 let det = self.config.plate_det_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("license_plate".into()))?;
                 let rec = self.config.plate_rec_model.clone()
@@ -366,6 +383,7 @@ impl EngineManager {
     pub async fn qr(&self) -> Result<Arc<EnginePool<QrDetector>>, AppError> {
         self.qr
             .get_or_try_init(|| async {
+                self.ensure_enabled("qr")?;
                 let path = self.config.qr_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("qr".into()))?;
                 let model_display = path.display().to_string();
@@ -392,6 +410,7 @@ impl EngineManager {
     pub async fn pose(&self) -> Result<Arc<EnginePool<DynPose>>, AppError> {
         self.pose
             .get_or_try_init(|| async {
+                self.ensure_enabled("pose")?;
                 let path = self.config.pose_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("pose".into()))?;
                 let model_display = path.display().to_string();
@@ -420,6 +439,7 @@ impl EngineManager {
     pub async fn depth(&self) -> Result<Arc<EnginePool<DynDepth>>, AppError> {
         self.depth
             .get_or_try_init(|| async {
+                self.ensure_enabled("depth")?;
                 let path = self.config.depth_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("depth".into()))?;
                 let model_display = path.display().to_string();
@@ -446,6 +466,7 @@ impl EngineManager {
     pub async fn human_parsing(&self) -> Result<Arc<EnginePool<HumanParsingEngine>>, AppError> {
         self.human_parsing
             .get_or_try_init(|| async {
+                self.ensure_enabled("human_parsing")?;
                 let path = self.config.human_parsing_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("human_parsing".into()))?;
                 let model_display = path.display().to_string();
@@ -772,5 +793,40 @@ mod tests {
     fn empty_pool_should_panic_with_clear_message() {
         // 空池防御:run() 的取模运算在 len=0 时除零,必须在构造边界显式失败
         let _ = EnginePool::<usize>::new(vec![]);
+    }
+
+    // ---- 能力白名单(§3.3:强制点在 loader 入口,先于一切模型路径/文件系统访问) ----
+
+    #[tokio::test]
+    async fn loader_should_return_capability_disabled_when_not_whitelisted() {
+        // 模型路径指向不存在的文件:若错误是 CapabilityDisabled 则证明加载在
+        // 触碰文件系统之前就被拒绝;若返回加载失败/未配置,说明强制点放错了位置
+        let config = Config {
+            detection_model: Some("/nonexistent/yolov8n.onnx".into()),
+            enabled_capabilities: Some(vec!["ocr".to_string()]),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.detection().await.err().expect("白名单外应返回错误");
+        assert!(
+            matches!(err, AppError::CapabilityDisabled(_)),
+            "实际: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loader_should_proceed_when_capability_whitelisted() {
+        // 白名单内 + 未配置模型路径 = ModelNotConfigured(而非白名单错误),
+        // 证明白名单放行后走原有路径
+        let config = Config {
+            enabled_capabilities: Some(vec!["detection".to_string()]),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.detection().await.err().expect("未配置模型应返回错误");
+        assert!(
+            matches!(err, AppError::ModelNotConfigured(_)),
+            "实际: {err:?}"
+        );
     }
 }

@@ -24,10 +24,14 @@ use crate::routes::health::AppState;
 pub struct CapabilityModels {
     /// 该能力所需的全部模型路径均已配置（缺任一即 false，引擎无法加载）。
     pub configured: bool,
+    /// 在 `VISION_EXT_ENABLED_CAPABILITIES` 白名单内（未设置白名单 = 恒 true）。
+    /// 白名单外的能力在 loader 入口即被拒绝，永远不会加载。
+    pub enabled: bool,
     /// 引擎实例已创建（`OnceCell` 已初始化）。
     ///
-    /// 注意：`OnceCell` 会缓存失败实例，加载失败时此处也为 true——判"推理可用"
-    /// 须配合 `/health?deep=true` 的 `engine_health`。
+    /// 注意：`get_or_try_init` 失败时不写入 cell，加载失败后仍为 false——
+    /// 下次请求会重新尝试加载。判"推理可用"须配合 `/health?deep=true` 的
+    /// `engine_health`。
     pub loaded: bool,
     /// 模型文件名去扩展名（不含目录）。多段式管线（OCR/车牌）含 det + rec，
     /// 字典等非模型文件不计入。
@@ -35,9 +39,10 @@ pub struct CapabilityModels {
 }
 
 /// 组装单个能力项：`model_paths` 中已配置的路径取文件名去扩展名。
-fn cap(model_paths: &[&Option<PathBuf>], configured: bool, loaded: bool) -> CapabilityModels {
+fn cap(model_paths: &[&Option<PathBuf>], configured: bool, enabled: bool, loaded: bool) -> CapabilityModels {
     CapabilityModels {
         configured,
+        enabled,
         loaded,
         models: model_paths
             .iter()
@@ -58,7 +63,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
             cap(
                 &[&config.detection_model],
                 config.detection_model.is_some(),
-                on("detection"),
+                config.capability_enabled("detection"), on("detection"),
             ),
         ),
         (
@@ -66,19 +71,19 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
             cap(
                 &[&config.classification_model],
                 config.classification_model.is_some(),
-                on("classification"),
+                config.capability_enabled("classification"), on("classification"),
             ),
         ),
         (
             "obb",
-            cap(&[&config.obb_model], config.obb_model.is_some(), on("obb")),
+            cap(&[&config.obb_model], config.obb_model.is_some(), config.capability_enabled("obb"), on("obb")),
         ),
         (
             "face_detection",
             cap(
                 &[&config.face_det_model],
                 config.face_det_model.is_some(),
-                on("face_detection"),
+                config.capability_enabled("face_detection"), on("face_detection"),
             ),
         ),
         (
@@ -86,7 +91,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
             cap(
                 &[&config.face_rec_model],
                 config.face_rec_model.is_some(),
-                on("face_recognition"),
+                config.capability_enabled("face_recognition"), on("face_recognition"),
             ),
         ),
         (
@@ -97,7 +102,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 config.ocr_det_model.is_some()
                     && config.ocr_rec_model.is_some()
                     && config.ocr_dict.is_some(),
-                on("ocr"),
+                config.capability_enabled("ocr"), on("ocr"),
             ),
         ),
         (
@@ -105,19 +110,19 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
             cap(
                 &[&config.plate_det_model, &config.plate_rec_model],
                 config.plate_det_model.is_some() && config.plate_rec_model.is_some(),
-                on("license_plate"),
+                config.capability_enabled("license_plate"), on("license_plate"),
             ),
         ),
         (
             "qr",
-            cap(&[&config.qr_model], config.qr_model.is_some(), on("qr")),
+            cap(&[&config.qr_model], config.qr_model.is_some(), config.capability_enabled("qr"), on("qr")),
         ),
         (
             "pose",
             cap(
                 &[&config.pose_model],
                 config.pose_model.is_some(),
-                on("pose"),
+                config.capability_enabled("pose"), on("pose"),
             ),
         ),
         (
@@ -125,7 +130,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
             cap(
                 &[&config.depth_model],
                 config.depth_model.is_some(),
-                on("depth"),
+                config.capability_enabled("depth"), on("depth"),
             ),
         ),
         (
@@ -133,7 +138,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
             cap(
                 &[&config.human_parsing_model],
                 config.human_parsing_model.is_some(),
-                on("human_parsing"),
+                config.capability_enabled("human_parsing"), on("human_parsing"),
             ),
         ),
     ];
@@ -265,6 +270,33 @@ mod tests {
         assert!(
             !cap_of(&caps, "classification").loaded,
             "未加载能力应为 false"
+        );
+    }
+
+    // ---- enabled 字段(§3.3 能力白名单) ----
+
+    #[test]
+    fn enabled_should_default_true_when_whitelist_unset() {
+        let config = paths(&[("detection", Some("/models/yolov8n.onnx"))]);
+        let cm = cap_of(&capability_models(&config, &[]), "detection");
+        assert!(
+            cm.enabled,
+            "未设置白名单时全部能力 enabled=true（零回归默认）"
+        );
+    }
+
+    #[test]
+    fn enabled_should_reflect_whitelist_exclusion() {
+        let mut config = paths(&[("detection", Some("/models/yolov8n.onnx"))]);
+        config.enabled_capabilities = Some(vec!["ocr".into()]);
+        let caps = capability_models(&config, &[]);
+        assert!(
+            !cap_of(&caps, "detection").enabled,
+            "白名单外能力 enabled=false（即使模型路径已配置）"
+        );
+        assert!(
+            cap_of(&caps, "ocr").enabled,
+            "白名单内能力 enabled=true（即使模型未配置）"
         );
     }
 

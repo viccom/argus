@@ -46,7 +46,9 @@ pub struct HealthQuery {
 /// GET /health[?deep=true]
 ///
 /// 浅检返回已加载引擎（`engines`）；deep=true 追加:
-/// - `configured`:配置了模型路径的能力清单(与 engines 对照可见"配置了未加载");
+/// - `configured`:配置了模型路径且在白名单内的能力清单(与 engines 对照可见
+///   "配置了未加载";白名单外能力被过滤——它们永远不会加载,列出只会造成
+///   "配了却没起来"的沉默困惑);
 /// - `engine_health`:对每个已加载引擎发 dummy 推理,返回 ok/degraded 状态数组。
 ///   动机:arena OOM 后 cuBLAS 永久失败,浅检(端口活)不可见——僵尸态。
 pub async fn health(
@@ -62,7 +64,13 @@ pub async fn health(
         "uptime_s": state.started_at.elapsed().as_secs(),
     });
     if query.deep.unwrap_or(false) {
-        body["configured"] = json!(state.config.configured_engines());
+        let configured: Vec<_> = state
+            .config
+            .configured_engines()
+            .into_iter()
+            .filter(|c| state.config.capability_enabled(c))
+            .collect();
+        body["configured"] = json!(configured);
         let health_results = state.engines.deep_health_check().await;
         body["engine_health"] = json!(health_results);
     }

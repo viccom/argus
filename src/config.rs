@@ -73,6 +73,10 @@ pub struct Config {
     /// 背景：内存被 ORT 每 session 运行时开销主导，ocr + human_parsing 两项占全量
     /// 83%（12.4GB 中 ~10.3GB）；把这两项与 depth 设 1 即可拿回大部分内存。
     pub pools: HashMap<String, usize>,
+    /// 能力白名单（`VISION_EXT_ENABLED_CAPABILITIES`，逗号分隔能力键）。
+    /// `None` = 未设置 = 现有行为（凡模型路径已配置即启用），零回归。
+    /// 白名单外的能力在 loader 入口即被拒绝：不触碰文件系统、不创建 session。
+    pub enabled_capabilities: Option<Vec<String>>,
 }
 
 impl Default for Config {
@@ -104,6 +108,7 @@ impl Default for Config {
             human_parsing_model: None,
             warmup_sizes: HashMap::new(),
             pools: HashMap::new(),
+            enabled_capabilities: None,
         }
     }
 }
@@ -192,7 +197,28 @@ impl Config {
             }
         }
 
+        let whitelist: Option<Vec<String>> = env::var("VISION_EXT_ENABLED_CAPABILITIES")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty() && CAPABILITY_KEYS.contains(k))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty());
+        cfg.enabled_capabilities = whitelist;
+
         cfg
+    }
+
+    /// 能力是否在白名单内；未设置白名单 = 全部允许（现有行为）。
+    pub fn capability_enabled(&self, capability: &str) -> bool {
+        match &self.enabled_capabilities {
+            None => true,
+            Some(list) => list.iter().any(|k| k == capability),
+        }
     }
 
     /// 预热 dummy 输入尺寸覆盖；`None` = 沿用引擎 `input_size`（默认行为）。
@@ -402,6 +428,8 @@ mod tests {
 
     #[test]
     fn warmup_size_should_default_to_engine_input_size_when_unset() {
+        // 断言依赖"该 env 未设置",必须持锁,否则与并行 set env 的测试竞争(实测 flaky)
+        let _guard = env_lock();
         let config = Config::from_env();
         assert_eq!(
             config.warmup_size_for("ocr"),
@@ -508,6 +536,57 @@ mod tests {
             env::remove_var("VISION_EXT_ENGINE_POOL");
             env::remove_var("VISION_EXT_DEPTH_POOL");
             env::remove_var("VISION_EXT_HUMAN_PARSING_POOL");
+        }
+    }
+
+    // ---- 能力白名单（§3.3：VISION_EXT_ENABLED_CAPABILITIES） ----
+
+    #[test]
+    fn capability_enabled_should_default_to_all_when_unset() {
+        // 断言依赖"白名单 env 未设置"，必须持锁防并行污染
+        let _guard = env_lock();
+        let config = Config::from_env();
+        assert!(
+            config.capability_enabled("detection") && config.capability_enabled("ocr"),
+            "未设置白名单 = 现有行为（凡模型路径已配置即启用），零回归默认"
+        );
+    }
+
+    #[test]
+    fn from_env_should_parse_enabled_capabilities() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ENABLED_CAPABILITIES", "detection,ocr");
+        }
+        let config = Config::from_env();
+        assert!(config.capability_enabled("detection"));
+        assert!(config.capability_enabled("ocr"));
+        assert!(
+            !config.capability_enabled("depth"),
+            "白名单外能力必须被拒绝加载"
+        );
+        unsafe {
+            env::remove_var("VISION_EXT_ENABLED_CAPABILITIES");
+        }
+    }
+
+    #[test]
+    fn enabled_capabilities_should_trim_spaces_and_drop_unknown_keys() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("VISION_EXT_ENABLED_CAPABILITIES", " ocr , bogus_cap ");
+        }
+        let config = Config::from_env();
+        assert!(
+            config.capability_enabled("ocr"),
+            "空格应被容忍（手写 env 常见）"
+        );
+        assert!(
+            !config.capability_enabled("bogus_cap"),
+            "未知键不是合法能力名，不得意外生效"
+        );
+        unsafe {
+            env::remove_var("VISION_EXT_ENABLED_CAPABILITIES");
         }
     }
 }

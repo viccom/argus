@@ -14,6 +14,9 @@ pub enum AppError {
     #[error("模型未配置: {0}（请在环境变量中设置对应模型路径）")]
     ModelNotConfigured(String),
 
+    #[error("能力未启用: {0}（不在 VISION_EXT_ENABLED_CAPABILITIES 白名单中）")]
+    CapabilityDisabled(String),
+
     #[error("推理失败: {0}")]
     Inference(String),
 
@@ -77,6 +80,14 @@ mod tests {
     fn model_not_configured_should_mention_capability() {
         let err = AppError::ModelNotConfigured("face_detect".into());
         assert!(err.to_string().contains("face_detect"));
+    }
+
+    #[test]
+    fn capability_disabled_should_mention_whitelist_for_troubleshooting() {
+        // 与"模型未配置"必须可区分:排错时一眼分清"缺配置"还是"被白名单挡住"
+        let err = AppError::CapabilityDisabled("ocr".into());
+        let msg = err.to_string();
+        assert!(msg.contains("ocr") && msg.contains("白名单"), "实际: {msg}");
     }
 
     #[test]
