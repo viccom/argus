@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         models_dir = %config.models_dir.display(),
         max_body_mb = config.max_body_mb,
         max_concurrent_inference = config.max_concurrent_inference,
-        "vision-ext 启动中"
+        "argus 启动中"
     );
 
     tracing::info!("已配置模型能力: {:?}", config.configured_engines());
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = build_router(state, auth_token);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!("vision-ext 监听 http://0.0.0.0:{port}");
+    tracing::info!("argus 监听 http://0.0.0.0:{port}");
 
     // 优雅停机：SIGINT/SIGTERM 后停止接受新连接，等待在途请求（含长推理）完成。
     // keep-alive 连接不会主动关闭，axum drain 可能永远不完成——超时上限只从
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    tracing::info!("vision-ext 已停止 ({})", crate::version::version_string());
+    tracing::info!("argus 已停止 ({})", crate::version::version_string());
 
     Ok(())
 }

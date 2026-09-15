@@ -1,4 +1,4 @@
-# vision-ext 按需加载优化方案
+# argus 按需加载优化方案
 
 > 目的:治理按需加载(懒加载)模式的四类代价——冷启动击穿客户端超时、池大小线性放大成本、
 > 加载无准入、内存只增不减。
@@ -47,13 +47,13 @@
 ```bash
 # 日志证据(加载耗时 / 每实例预热耗时)
 grep -E '池\([0-9]+\) 加载完成|预热开始|实例 [0-9]+/[0-9]+ 预热' \
-  ~/.local/state/warden/data/logs/vision-ext/$(date +%F).log
+  ~/.local/state/warden/data/logs/argus/$(date +%F).log
 
 # 逐能力内存:重启后从空载逐个打端点,每次读 RSS
 # 注意 PID 必须取 warden 报告的权威值(直接 pgrep 会取到过渡进程,曾导致一轮数据全为 0)
 TOKEN=<warden token>
 PID=$(curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8789/api/v1/services \
-      | jq -r '.services[]|select(.name=="vision-ext")|.state.pid')
+      | jq -r '.services[]|select(.name=="argus")|.state.pid')
 ps -o rss= -p "$PID"
 ```
 
@@ -68,13 +68,13 @@ ps -o rss= -p "$PID"
    (`safe_bot_v0/web_app/backend/modules/ai/detector.py:157`)< OCR 冷启动 85s;
    而网关把 Timeout 归入连接类异常、累加 `consecutive_failures`,达 3 次摘除端点
    (30s 内健康检查会回池,可自愈)。后果:连续几次冷 OCR 调用会让消费方把**健康**的
-   vision-ext 短暂标记为不健康。
+   argus 短暂标记为不健康。
 4. **内存只增不减、无上限、无淘汰**:`OnceCell` 永不释放;无 unload 端点;
-   `VISION_EXT_GPU_MEM_LIMIT_MB` 只管 CUDA,CPU 侧无内存上限。
+   `ARGUS_GPU_MEM_LIMIT_MB` 只管 CUDA,CPU 侧无内存上限。
 5. **加载路径无准入控制、无超时**:`engines.X().await`(含加载+预热)在 `acquire_permit`
    **之前**(`src/routes/detection.rs:170-172`、`src/routes/analysis.rs:264-266` 等),
    因此背压信号量**管不到加载**;11 个并发首次请求 → 44 个 session 同时构建。
-   且加载中的等待不受 `VISION_EXT_ACQUIRE_TIMEOUT_MS` 约束(许可在加载之后才申请),
+   且加载中的等待不受 `ARGUS_ACQUIRE_TIMEOUT_MS` 约束(许可在加载之后才申请),
    冷启动期间请求可无限期挂起。
 6. **冷 / 缺 / 坏三态不可区分**:`/health?deep=true` 的 `check_engine!` 宏
    (`src/engine.rs:49-71`)对未加载引擎**直接跳过**(`if let Some(pool) = cell.get()`),
@@ -109,13 +109,13 @@ ps -o rss= -p "$PID"
 - 若 ii 只是预热变快、而**首个真实请求**仍慢 → 小 dummy 温不到 rec 的动态宽度路径,
   修法不成立,退化为提供开关。
 - 若 iii 的两个数与 i 相当 → 预热在 CPU 上本就无收益,提供
-  `VISION_EXT_<CAP>_WARMUP=0/1` 关闭开关并在 README 记录代价。
+  `ARGUS_<CAP>_WARMUP=0/1` 关闭开关并在 README 记录代价。
 
 > **口径要点**:必须同时量"首个真实请求耗时"。只量预热耗时会把"把成本挪到首请求"误判为优化。
 
 ### 3.2 单能力独立设池
 
-- 新增 `VISION_EXT_<CAP>_POOL`,覆盖全局 `VISION_EXT_ENGINE_POOL`;未设置则回退全局。
+- 新增 `ARGUS_<CAP>_POOL`,覆盖全局 `ARGUS_ENGINE_POOL`;未设置则回退全局。
 - 新增 `Config::pool_for(capability) -> usize`;`src/engine.rs` 的 11 处 loader
   (`:168,196,224,250,278,310,340,374,400,428,454`)由 `self.config.engine_pool`
   改为 `self.config.pool_for("<capability>")`。
@@ -131,21 +131,21 @@ ps -o rss= -p "$PID"
 
 | 能力键(规范名) | 现有模型路径 env | 新增池 env | 白名单取值 |
 |---|---|---|---|
-| detection | `VISION_EXT_DETECTION_MODEL` | `VISION_EXT_DETECTION_POOL` | `detection` |
-| classification | `VISION_EXT_CLASSIFICATION_MODEL` | `VISION_EXT_CLASSIFICATION_POOL` | `classification` |
-| obb | `VISION_EXT_OBB_MODEL` | `VISION_EXT_OBB_POOL` | `obb` |
-| face_detection | `VISION_EXT_FACE_DET_MODEL` | `VISION_EXT_FACE_DETECTION_POOL` | `face_detection` |
-| face_recognition | `VISION_EXT_FACE_REC_MODEL` | `VISION_EXT_FACE_RECOGNITION_POOL` | `face_recognition` |
-| ocr | `VISION_EXT_OCR_DET_MODEL` + `_REC_` + `_DICT` | `VISION_EXT_OCR_POOL` | `ocr` |
-| license_plate | `VISION_EXT_PLATE_DET_MODEL` + `_REC_` | `VISION_EXT_LICENSE_PLATE_POOL` | `license_plate` |
-| qr | `VISION_EXT_QR_MODEL` | `VISION_EXT_QR_POOL` | `qr` |
-| pose | `VISION_EXT_POSE_MODEL` | `VISION_EXT_POSE_POOL` | `pose` |
-| depth | `VISION_EXT_DEPTH_MODEL` | `VISION_EXT_DEPTH_POOL` | `depth` |
-| human_parsing | `VISION_EXT_HUMAN_PARSING_MODEL` | `VISION_EXT_HUMAN_PARSING_POOL` | `human_parsing` |
+| detection | `ARGUS_DETECTION_MODEL` | `ARGUS_DETECTION_POOL` | `detection` |
+| classification | `ARGUS_CLASSIFICATION_MODEL` | `ARGUS_CLASSIFICATION_POOL` | `classification` |
+| obb | `ARGUS_OBB_MODEL` | `ARGUS_OBB_POOL` | `obb` |
+| face_detection | `ARGUS_FACE_DET_MODEL` | `ARGUS_FACE_DETECTION_POOL` | `face_detection` |
+| face_recognition | `ARGUS_FACE_REC_MODEL` | `ARGUS_FACE_RECOGNITION_POOL` | `face_recognition` |
+| ocr | `ARGUS_OCR_DET_MODEL` + `_REC_` + `_DICT` | `ARGUS_OCR_POOL` | `ocr` |
+| license_plate | `ARGUS_PLATE_DET_MODEL` + `_REC_` | `ARGUS_LICENSE_PLATE_POOL` | `license_plate` |
+| qr | `ARGUS_QR_MODEL` | `ARGUS_QR_POOL` | `qr` |
+| pose | `ARGUS_POSE_MODEL` | `ARGUS_POSE_POOL` | `pose` |
+| depth | `ARGUS_DEPTH_MODEL` | `ARGUS_DEPTH_POOL` | `depth` |
+| human_parsing | `ARGUS_HUMAN_PARSING_MODEL` | `ARGUS_HUMAN_PARSING_POOL` | `human_parsing` |
 
 ### 3.3 能力白名单("配置中不定义的就不加载")
 
-- 新增 `VISION_EXT_ENABLED_CAPABILITIES=detection,face_detection,...`(逗号分隔能力键)。
+- 新增 `ARGUS_ENABLED_CAPABILITIES=detection,face_detection,...`(逗号分隔能力键)。
 - **未设置 = 现有行为**(凡模型路径已配置即启用),保证零回归。
 - 强制点在 11 个 loader 入口:不在白名单 → 返回明确错误(与"模型未配置"区分,便于排错),
   **不触碰文件系统、不创建 session**。
@@ -169,7 +169,7 @@ ps -o rss= -p "$PID"
   ①该池**全部许可空闲**(`available_permits() == capacity`,即无在途推理)、
   ②空闲时长 > TTL、③不在 pin 集合内 —— 才丢弃管理器持有的 `Arc`。
   在途请求各自持 `Arc`,淘汰不会中断它们;内存待最后一个 `Arc` 释放才回收。
-- 后台回收任务由 `main.rs` 在 `VISION_EXT_IDLE_EVICT_SECS > 0` 时拉起(**默认 0 = 关闭**,
+- 后台回收任务由 `main.rs` 在 `ARGUS_IDLE_EVICT_SECS > 0` 时拉起(**默认 0 = 关闭**,
   保持现状)。
 - **pin 与白名单语义分开**:白名单 = 可否加载;pin = 可否淘汰。当前可共用同一份列表,
   但语义必须分别文档化。
@@ -197,8 +197,8 @@ ps -o rss= -p "$PID"
 
 | 项 | 状态 | 验证证据 | 日期 |
 |---|---|---|---|
-| 基线测量(冷启动 + 内存) | ✅ | §1.1 / §1.2 表;日志 `~/.local/state/warden/data/logs/vision-ext/2026-09-11.log` | 2026-09-11 |
-| 3.1 修 OCR 预热 | ✅ 已实施 | 三组对照(池 4,冷启动 POST /ocr 真实图):现状 960 dummy 预热 81.5s/首请求 91.3s;320 小 dummy 预热 1.8s/首请求 11.7s(首推理 6.44s 不变);关闭预热 首请求 10.0s(首推理 6.52s≈热态 6.55s)。**命中分支 1**:dummy 是主因。实现 `VISION_EXT_<CAP>_WARMUP_SIZE`(commit 1482e06);E2E:OCR=320x320 生效,预热 4×445ms,冷首请求 11.7s。附加发现:CPU 上预热对首次真实推理无可见收益(组 iii),保留预热仅消除潜在首次抖动,已记 README | 2026-09-11 |
+| 基线测量(冷启动 + 内存) | ✅ | §1.1 / §1.2 表;日志 `~/.local/state/warden/data/logs/argus/2026-09-11.log` | 2026-09-11 |
+| 3.1 修 OCR 预热 | ✅ 已实施 | 三组对照(池 4,冷启动 POST /ocr 真实图):现状 960 dummy 预热 81.5s/首请求 91.3s;320 小 dummy 预热 1.8s/首请求 11.7s(首推理 6.44s 不变);关闭预热 首请求 10.0s(首推理 6.52s≈热态 6.55s)。**命中分支 1**:dummy 是主因。实现 `ARGUS_<CAP>_WARMUP_SIZE`(commit 1482e06);E2E:OCR=320x320 生效,预热 4×445ms,冷首请求 11.7s。附加发现:CPU 上预热对首次真实推理无可见收益(组 iii),保留预热仅消除潜在首次抖动,已记 README | 2026-09-11 |
 | 3.2 单能力独立设池 | ✅ 已实施 | TDD 4 测试(回退/覆盖/能力隔离/非法值)。E2E(池覆盖 OCR/HP/DEPTH=1,其余池 4,全能力逐个加载):RSS 总增量 **12.39GB→3.91GB**(ocr +0.75GB、depth +0.33GB、human_parsing +1.74GB),OCR 冷首请求 11.7s→7.85s(pool=1 只加载 1 实例)。commit 846bd56 | 2026-09-11 |
 | 3.3 能力白名单 | ✅ 已实施 | TDD 6 测试(loader 强制点用不存在路径验证不触文件系统)。E2E:白名单 `detection,ocr` 下 /depth 返回"能力未启用"(与未配置可区分)、/models `enabled=false`、/health deep `configured` 过滤为 `[detection,ocr]`、白名单内 /detect 正常;移除白名单后恢复默认全启用(零回归)。commit 14f63f0 | 2026-09-11 |
 | 4 空闲淘汰 | ⬜ 前置门未过 | 需先验证 RSS 回落 | |

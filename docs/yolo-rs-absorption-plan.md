@@ -1,6 +1,6 @@
 # yolo-rs 核心能力吸收与退役方案
 
-> 目的:将 yolo-rs 的核心能力(除对外 API 契约)吸收进 vision-ext + rust-onnx-infer,最终归档 yolo-rs。
+> 目的:将 yolo-rs 的核心能力(除对外 API 契约)吸收进 argus + rust-onnx-infer,最终归档 yolo-rs。
 > 前提决策(2026-09-10 会话确认):yolo-rs **从未与 safe-bot 实际对接**(A100 仅为测试环境),"契约锁定"护城河不存在;safe-bot 适配走"直接改造消费方"(独立 api-gateway 仅作备选)。
 > 本文是唯一实施事实源;进度同步到 `engine-exposure-plan.md` 批次表。
 
@@ -53,7 +53,7 @@
 
 **运行时参数(yolo-rs 有,rust-onnx-infer 无)**
 - 每请求 `confidence`(multipart form)、全局 `YOLO_IOU`;
-- rust-onnx-infer 阈值/NMS 均构造期固定(`set_confidence_threshold(&mut self)`),vision-ext 的 `Arc<EnginePool>` 不可变;
+- rust-onnx-infer 阈值/NMS 均构造期固定(`set_confidence_threshold(&mut self)`),argus 的 `Arc<EnginePool>` 不可变;
 - **吸收方案**:检测引擎构造期用低阈值(0.10),HTTP 层收到每请求 confidence 后对结果**后过滤**(类内 NMS 保序:低阈值 NMS 结果是任意高阈值结果的超集,后过滤数学安全);iou 保持全局配置(v1 不做每请求 iou,工程取舍)。
 
 ### 1.2 模型管理(`models/manager.rs`)
@@ -66,19 +66,19 @@
 ### 1.3 服务层(`main.rs`/`routes/`)
 
 - **背压语义(fail-fast)**:`try_acquire()` 耗尽即返 Overload,**不在信号量上排队**——生产建议 `max_concurrent = pool_size` 防 arena 雪崩;
-  - ⚠️ vision-ext 现语义是 `acquire + 30s 超时`(排队)。**差异点**:内网低负载排队更友好;GPU 生产 fail-fast 防雪崩。吸收时做成可配(`acquire_timeout_ms=0` 即 fail-fast)。
+  - ⚠️ argus 现语义是 `acquire + 30s 超时`(排队)。**差异点**:内网低负载排队更友好;GPU 生产 fail-fast 防雪崩。吸收时做成可配(`acquire_timeout_ms=0` 即 fail-fast)。
 - `/detect/batch`:**逐图 for 循环**(非张量 batch),每图独立背压 permit;契约源自 detector.py(`image_paths` 服务端本地路径);
 - `save_result`:imageproc 红框标注 + uuid 命名落盘 result_dir(低优先,契约适配期再做);
 - 慢请求日志:>1s 升级 warn(A100 热态单请求 ~18ms,超 1s 即异常);
-- 双语类名(COCO 80 中英映射表)+ summary(person=0,vehicle=1/2/3/5/7):**适配层职责,不进 vision-ext 核心**(见 §三);
-- request_id 三层:Set(最外)→ Propagate → Trace(span),推理日志自动携带——vision-ext 已同款;
+- 双语类名(COCO 80 中英映射表)+ summary(person=0,vehicle=1/2/3/5/7):**适配层职责,不进 argus 核心**(见 §三);
+- request_id 三层:Set(最外)→ Propagate → Trace(span),推理日志自动携带——argus 已同款;
 - 优雅停机:SIGINT+SIGTERM,无超时上限(依赖 systemd TimeoutStopSec)。
 
-## 二、差距矩阵(rust-onnx-infer / vision-ext 现状)
+## 二、差距矩阵(rust-onnx-infer / argus 现状)
 
 | # | yolo-rs 能力 | 现状 | 差距类型 |
 |---|---|---|---|
-| G1 | Session 池 + 线程预算 | vision-ext EnginePool(permit 排队+30s) | ✅ 已有;背压语义需可配(G6) |
+| G1 | Session 池 + 线程预算 | argus EnginePool(permit 排队+30s) | ✅ 已有;背压语义需可配(G6) |
 | G2 | arch/End2End 自动识别 | rust-onnx-infer detection.rs | ✅ 已有 |
 | G3 | letterbox/NMS/坐标反算/NaN 防护 | rust-onnx-infer | ✅ 已有(resize 更稳) |
 | G4 | CUDA 显存上限 | `CUDA::default()` 无 with_memory_limit | ❌ **缺口 A**:~15 行 |
@@ -102,14 +102,14 @@
 
 ### 阶段 0:fork rust-onnx-infer → viccom(前置,消除单点)
 - GitHub 建 `viccom/rust-onnx-infer`(含本地 2 补丁:api-26 + resize 卷积修复),origin 换 fork;
-- vision-ext Cargo.toml 由 path 依赖换 git 依赖(或 path 指向固定 commit),README 依赖说明改写;
-- **验证**:两仓库 CI 三绿;vision-ext 编译产物行为不变(bus.jpg 检出基线)。
+- argus Cargo.toml 由 path 依赖换 git 依赖(或 path 指向固定 commit),README 依赖说明改写;
+- **验证**:两仓库 CI 三绿;argus 编译产物行为不变(bus.jpg 检出基线)。
 
 ### 阶段 1:GPU 硬化(缺口 A+B+C,~1 天)
-- `OnnxRuntimeConfig` 加 `gpu_mem_limit_mb`(默认 0);`add_cuda_ep` 接 `with_memory_limit`;vision-ext env 透传 `VISION_EXT_GPU_MEM_LIMIT_MB`;
+- `OnnxRuntimeConfig` 加 `gpu_mem_limit_mb`(默认 0);`add_cuda_ep` 接 `with_memory_limit`;argus env 透传 `ARGUS_GPU_MEM_LIMIT_MB`;
 - 预热:EngineManager 引擎加载后对池内每实例跑 dummy 推理(DetectionEngine 用 640 零张量;各引擎用自身 input_size),失败 warn 不阻断;日志含每实例耗时;
 - 深检:`/health?deep=true` 对已加载引擎发 dummy 推理,输出 `engine_health` 数组(ok/degraded);浅检不动;
-- 背压可配:`VISION_EXT_ACQUIRE_TIMEOUT_MS`(默认 30000;**0 = try_acquire fail-fast**,生产 GPU 与 pool 对齐);
+- 背压可配:`ARGUS_ACQUIRE_TIMEOUT_MS`(默认 30000;**0 = try_acquire fail-fast**,生产 GPU 与 pool 对齐);
 - TDD:config 解析/timeout=0 行为/dummy 预热失败不阻断;CPU 路径零回归(85 测试)。
 - **关键细节必须带上**:arena 只增不减注释、2.9GB/Session 实测数、fail-fast 与 pool_size 对齐建议、1.26.0 ORT 匹配说明。
 
@@ -130,19 +130,19 @@
 - save_result 暂缓(契约适配期)。
 
 ### 阶段 4:A100 对标(实测说话,~1 天)
-- **CPU 前置基线(2026-09-10 实测,16 核共享 KVM)**:vision-ext 与 yolo-rs 同机对压(同 ORT 1.26.0 dylib、同模型文件、同图、同压测脚本)。pool=1/intra=4:单请求 p50 67ms vs 79ms(vision-ext 快 16%),吞吐上限 17-18 vs 20-22 QPS(yolo-rs 预处理在 session 锁外,串行段短;pool>1 时差距消失)。pool=4/intra=4:**天花板打平 ~34-35 QPS**,vision-ext p95 全档优 10~30%(c=16: 534 vs 796ms),c=128 双方零错误。结论:纯 CPU 下 vision-ext 已达 yolo-rs 同水平;500 QPS 基线仍待本阶段 A100 实测。压测脚本 `scripts/bench_http.py`;yolo-rs 对照服务已注册 warden(:7041,auto_start=false)。
+- **CPU 前置基线(2026-09-10 实测,16 核共享 KVM)**:argus 与 yolo-rs 同机对压(同 ORT 1.26.0 dylib、同模型文件、同图、同压测脚本)。pool=1/intra=4:单请求 p50 67ms vs 79ms(argus 快 16%),吞吐上限 17-18 vs 20-22 QPS(yolo-rs 预处理在 session 锁外,串行段短;pool>1 时差距消失)。pool=4/intra=4:**天花板打平 ~34-35 QPS**,argus p95 全档优 10~30%(c=16: 534 vs 796ms),c=128 双方零错误。结论:纯 CPU 下 argus 已达 yolo-rs 同水平;500 QPS 基线仍待本阶段 A100 实测。压测脚本 `scripts/bench_http.py`;yolo-rs 对照服务已注册 warden(:7041,auto_start=false)。
 - yhpc 部署:CUDA 12.8.1(cuDNN 9.8)容器基底(勿回退 9.1,差 2 倍);ORT 1.26.0;
 - `gpu_mem_limit_mb = 模型数 × 单模型峰值`(yolov8n ~3GB/Session 起步);`acquire_timeout_ms=0` + `max_concurrent=pool_size` + `engine_pool` 与 `ORT 线程`预算对齐(pool×intra≈核);
 - 压测基线:对齐 yolo-rs 的 500 QPS(bench 脚本可复用其 `scripts/bench_http.py` 思路);
 - 深检/预热在 GPU 上的实测验证(冷启动首请求延迟对比)。
 
 ### 阶段 5:safe-bot 适配(消费方改造)
-- detector.py/analysis/service.py 改指 vision-ext:双语类名(COCO 映射表搬过去)、summary 消费方自算;
+- detector.py/analysis/service.py 改指 argus:双语类名(COCO 映射表搬过去)、summary 消费方自算;
 - 若改造受阻 → 备选:独立 api-gateway(仅翻译契约,无推理);**默认走改造**。
 
 ### 阶段 6:yolo-rs 归档
-- README 顶部标注 `superseded by vision-ext`,仓库转 archive;
-- 前置条件:阶段 4 压测达标 + safe-bot 在 vision-ext 上运行 ≥1 个观察周期。
+- README 顶部标注 `superseded by argus`,仓库转 archive;
+- 前置条件:阶段 4 压测达标 + safe-bot 在 argus 上运行 ≥1 个观察周期。
 
 ## 五、风险登记
 
@@ -157,8 +157,8 @@
 
 | 阶段 | 状态 | 验证证据 | 日期 |
 |---|---|---|---|
-| 0 fork rust-onnx-infer | ✅ | fork viccom/rust-onnx-infer(public,origin=fork/upstream=javpower);推送本地 2 提交(8158cf0..0156c8d);vision-ext Cargo.toml path→git 依赖(锁定 commit 0156c8d5);README 依赖说明改写;`cargo build --jobs 6` 通过;`cargo test --jobs 6` 84+1 全绿;warden 重启后 bus.jpg 替代图检出逐位一致(7 框 5bird+2sheep,bbox/confidence 全同,仅 inference_ms 271→286 首次加载波动) | 2026-09-10 |
-| 1 GPU 硬化(显存上限/预热/深检/背压可配) | ✅ | **缺口 A**:rust-onnx-infer 加进程级 `GLOBAL_GPU_MEM_LIMIT_MB: AtomicUsize` + `set_global_gpu_mem_limit()`,`add_cuda_ep` 在 >0 时调 `CUDA::with_memory_limit(mb*1024*1024)`(已 push fork commit e9a5900);vision-ext `main.rs` 启动时 `VISION_EXT_GPU_MEM_LIMIT_MB>0` 即 override。**缺口 B**:`EnginePool::warmup()` 对每实例跑 dummy 推理(失败 warn 不阻断,与 yolo-rs 同款);`EngineManager::deep_health_check()` 对已加载引擎池实例 0 发 dummy 推理检测僵尸态(arena OOM 后 cuBLAS 永久失败);`/health?deep=true` 返回 `engine_health` 数组。**缺口 C**:`Config` 加 `acquire_timeout_ms`(默认 30000,0=fail-fast);`acquire_permit` 从 config 读超时,0 时 `try_acquire_owned()`。验证:`cargo build --jobs 6` 零警告;`cargo clippy --all-targets --jobs 6` 零警告;`cargo test --jobs 6` 89+1 全绿(config 5 新测试覆盖 gpu_mem_limit/acquire_timeout/fail-fast);rust-onnx-infer 95 测试全绿。 | 2026-09-10 |
+| 0 fork rust-onnx-infer | ✅ | fork viccom/rust-onnx-infer(public,origin=fork/upstream=javpower);推送本地 2 提交(8158cf0..0156c8d);argus Cargo.toml path→git 依赖(锁定 commit 0156c8d5);README 依赖说明改写;`cargo build --jobs 6` 通过;`cargo test --jobs 6` 84+1 全绿;warden 重启后 bus.jpg 替代图检出逐位一致(7 框 5bird+2sheep,bbox/confidence 全同,仅 inference_ms 271→286 首次加载波动) | 2026-09-10 |
+| 1 GPU 硬化(显存上限/预热/深检/背压可配) | ✅ | **缺口 A**:rust-onnx-infer 加进程级 `GLOBAL_GPU_MEM_LIMIT_MB: AtomicUsize` + `set_global_gpu_mem_limit()`,`add_cuda_ep` 在 >0 时调 `CUDA::with_memory_limit(mb*1024*1024)`(已 push fork commit e9a5900);argus `main.rs` 启动时 `ARGUS_GPU_MEM_LIMIT_MB>0` 即 override。**缺口 B**:`EnginePool::warmup()` 对每实例跑 dummy 推理(失败 warn 不阻断,与 yolo-rs 同款);`EngineManager::deep_health_check()` 对已加载引擎池实例 0 发 dummy 推理检测僵尸态(arena OOM 后 cuBLAS 永久失败);`/health?deep=true` 返回 `engine_health` 数组。**缺口 C**:`Config` 加 `acquire_timeout_ms`(默认 30000,0=fail-fast);`acquire_permit` 从 config 读超时,0 时 `try_acquire_owned()`。验证:`cargo build --jobs 6` 零警告;`cargo clippy --all-targets --jobs 6` 零警告;`cargo test --jobs 6` 89+1 全绿(config 5 新测试覆盖 gpu_mem_limit/acquire_timeout/fail-fast);rust-onnx-infer 95 测试全绿。 | 2026-09-10 |
 | 2 EngineManager 动态化(与 P2 重构合并,**批 1 收尾后才开始**) | ⬜ | | |
 | 3 HTTP 参数层(confidence 后过滤/batch/ROI) | ✅ | **顺序说明**:阶段 2 被批 1(任务 2-4 模型待获取,网络受限)硬前置卡住,按计划"0→1 可立即开始;2 必须等批 1"跳到阶段 3;`/detect/batch` 的 `model?` 依赖阶段 2,传入即拒绝(不静默忽略)。**缺口 E**:引擎构造阈值 0.25→`DETECTION_CONFIDENCE_FLOOR`=0.10(编译期 `const _: () = assert!` 锁定 ≥ `SahiConfig::LOW_MODEL_CONFIDENCE`,否则 SAHI postprocess 静默切 NMS/IOU);请求 `confidence` 默认 0.25(`DEFAULT_CONFIDENCE`,旧行为逐位等价),范围 [0.1,1.0] 越界 400;**SAHI 交互风险消除**:rust-onnx-infer fork 加 `SahiConfig.min_confidence`(commit 0c783f3),`collect_predictions` 合并前过滤,LOW_MODEL_CONFIDENCE 判断改用有效阈值 max(引擎,min_confidence)——与引擎直接以该阈值构造严格等价,不再是"低"风险而是数学等价(2 个 mock 测试锁定:低分大框合并前丢弃 union 90→50;有效阈值 0.3 保持 GREEDYNMM)。**缺口 G**:`routes/detect_filter.rs`——`Polygon`(JSON `[[x,y],...]`,≥3 点/坐标 [0,1] 越界 400,射线法含凹多边形测试)+ `target_classes`(JSON class_id 数组,空数组 400)+ `DetectFilter::apply`(bbox 中心归一化判定,与 yolo-rs 同款)。**缺口 F**:`routes/batch.rs`——JSON `image_paths`(服务端本地路径)逐图循环,每图独立 `acquire_permit`,**错误隔离**(yolo-rs 是 `?` 炸整批),JSON 解析失败走 HTTP 200 信封而非 axum 4xx 纯文本;模型未配置属整批级错误。**E2E 踩坑 1 条**:`DETECTION_CONFIDENCE_FLOOR as f64`=0.10000000149…,用户输入 `0.10` 被判越界——改为 f32 精度比较,回归测试 `filter_should_accept_user_literal_at_floor`。验证:`cargo clippy --all-targets --jobs 6` 零警告;`cargo test --jobs 6` **121+1 全绿**(89→121:+21 filter/+6 batch/+5 detection,health 反向断言翻转为正向);rust-onnx-infer lib 97 全绿(`new_engines_smoke` 10 失败为 `testmodels/` 缺文件,stash 对照确认预先存在);**warden 重启后 E2E**:`/detect` 默认 7 框与旧构建基线 `diff` 逐位一致,`sahi=true` 11 框/6 片逐位一致;`confidence=0.5`→3 bird、`=0.10`→12 框(min 0.146)、`=0.05`→整洁 400;`target_classes=[18]`→2 sheep;`roi` 左半→cx 236/427;三参数组合正确;SAHI+0.7→6 框与基线 ≥0.7 子集一致;`/detect/batch` 4 图(2 正常+不存在路径+`/etc/hostname`)→`succeeded 2/failed 2`,错误条目带原因,服务日志 WARN 留痕,正常图结果与单图端点一致。 | 2026-09-10 |
 | 4 A100 对标压测(yhpc,基线 500 QPS) | ⬜ | | |

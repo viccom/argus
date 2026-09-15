@@ -10,7 +10,7 @@ pub const CAPABILITY_KEYS: [&str; 11] = [
     "ocr", "license_plate", "qr", "pose", "depth", "human_parsing",
 ];
 
-/// 服务配置。所有字段均可通过环境变量覆盖（前缀 VISION_EXT_）。
+/// 服务配置。所有字段均可通过环境变量覆盖（前缀 ARGUS_）。
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: u16,
@@ -64,16 +64,16 @@ pub struct Config {
     pub depth_model: Option<PathBuf>,
     /// 人体解析模型路径。
     pub human_parsing_model: Option<PathBuf>,
-    /// 每能力预热 dummy 输入尺寸覆盖（`VISION_EXT_<CAP>_WARMUP_SIZE=WxH`）。
+    /// 每能力预热 dummy 输入尺寸覆盖（`ARGUS_<CAP>_WARMUP_SIZE=WxH`）。
     /// 未设置的能力沿用引擎 `input_size`。背景：OCR 预热在引擎默认的 960×960
     /// 全零 dummy 上为 20.4s/实例（det 对大块零图产出大量伪区域 + rec 批前向），
     /// 320×320 小图实测 0.43s/实例，首个真实请求推理耗时不变（2026-09-11 实测）。
     pub warmup_sizes: HashMap<String, (u32, u32)>,
-    /// 每能力实例池大小覆盖（`VISION_EXT_<CAP>_POOL`），未设置回退全局 `engine_pool`。
+    /// 每能力实例池大小覆盖（`ARGUS_<CAP>_POOL`），未设置回退全局 `engine_pool`。
     /// 背景：内存被 ORT 每 session 运行时开销主导，ocr + human_parsing 两项占全量
     /// 83%（12.4GB 中 ~10.3GB）；把这两项与 depth 设 1 即可拿回大部分内存。
     pub pools: HashMap<String, usize>,
-    /// 能力白名单（`VISION_EXT_ENABLED_CAPABILITIES`，逗号分隔能力键）。
+    /// 能力白名单（`ARGUS_ENABLED_CAPABILITIES`，逗号分隔能力键）。
     /// `None` = 未设置 = 现有行为（凡模型路径已配置即启用），零回归。
     /// 白名单外的能力在 loader 入口即被拒绝：不触碰文件系统、不创建 session。
     pub enabled_capabilities: Option<Vec<String>>,
@@ -117,70 +117,70 @@ impl Config {
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
-        if let Ok(v) = env::var("VISION_EXT_PORT") {
+        if let Ok(v) = env::var("ARGUS_PORT") {
             if let Ok(port) = v.parse() {
                 cfg.port = port;
             }
         }
-        if let Ok(v) = env::var("VISION_EXT_MODELS_DIR") {
+        if let Ok(v) = env::var("ARGUS_MODELS_DIR") {
             cfg.models_dir = PathBuf::from(v);
         }
-        if let Ok(v) = env::var("VISION_EXT_DEVICE") {
+        if let Ok(v) = env::var("ARGUS_DEVICE") {
             cfg.device = v.to_lowercase();
         }
-        if let Ok(v) = env::var("VISION_EXT_AUTH_TOKEN") {
+        if let Ok(v) = env::var("ARGUS_AUTH_TOKEN") {
             if !v.is_empty() {
                 cfg.auth_token = Some(v);
             }
         }
-        if let Ok(v) = env::var("VISION_EXT_MAX_BODY_MB") {
+        if let Ok(v) = env::var("ARGUS_MAX_BODY_MB") {
             if let Ok(n) = v.parse() {
                 cfg.max_body_mb = n;
             }
         }
-        if let Ok(v) = env::var("VISION_EXT_MAX_CONCURRENT_INFERENCE") {
+        if let Ok(v) = env::var("ARGUS_MAX_CONCURRENT_INFERENCE") {
             if let Ok(n) = v.parse() {
                 cfg.max_concurrent_inference = n;
             }
         }
-        if let Ok(v) = env::var("VISION_EXT_ENGINE_POOL") {
+        if let Ok(v) = env::var("ARGUS_ENGINE_POOL") {
             if let Ok(n) = v.parse::<usize>() {
                 cfg.engine_pool = n.max(1);
             }
         }
-        if let Ok(v) = env::var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS") {
+        if let Ok(v) = env::var("ARGUS_SHUTDOWN_TIMEOUT_SECS") {
             if let Ok(n) = v.parse::<u64>() {
                 cfg.shutdown_timeout_secs = n.max(1);
             }
         }
-        if let Ok(v) = env::var("VISION_EXT_GPU_MEM_LIMIT_MB") {
+        if let Ok(v) = env::var("ARGUS_GPU_MEM_LIMIT_MB") {
             if let Ok(n) = v.parse::<usize>() {
                 cfg.gpu_mem_limit_mb = n;
             }
         }
-        if let Ok(v) = env::var("VISION_EXT_ACQUIRE_TIMEOUT_MS") {
+        if let Ok(v) = env::var("ARGUS_ACQUIRE_TIMEOUT_MS") {
             if let Ok(n) = v.parse::<u64>() {
                 cfg.acquire_timeout_ms = n;
             }
         }
 
-        cfg.detection_model = env_path("VISION_EXT_DETECTION_MODEL");
-        cfg.classification_model = env_path("VISION_EXT_CLASSIFICATION_MODEL");
-        cfg.obb_model = env_path("VISION_EXT_OBB_MODEL");
-        cfg.face_det_model = env_path("VISION_EXT_FACE_DET_MODEL");
-        cfg.face_rec_model = env_path("VISION_EXT_FACE_REC_MODEL");
-        cfg.ocr_det_model = env_path("VISION_EXT_OCR_DET_MODEL");
-        cfg.ocr_rec_model = env_path("VISION_EXT_OCR_REC_MODEL");
-        cfg.ocr_dict = env_path("VISION_EXT_OCR_DICT");
-        cfg.plate_det_model = env_path("VISION_EXT_PLATE_DET_MODEL");
-        cfg.plate_rec_model = env_path("VISION_EXT_PLATE_REC_MODEL");
-        cfg.qr_model = env_path("VISION_EXT_QR_MODEL");
-        cfg.pose_model = env_path("VISION_EXT_POSE_MODEL");
-        cfg.depth_model = env_path("VISION_EXT_DEPTH_MODEL");
-        cfg.human_parsing_model = env_path("VISION_EXT_HUMAN_PARSING_MODEL");
+        cfg.detection_model = env_path("ARGUS_DETECTION_MODEL");
+        cfg.classification_model = env_path("ARGUS_CLASSIFICATION_MODEL");
+        cfg.obb_model = env_path("ARGUS_OBB_MODEL");
+        cfg.face_det_model = env_path("ARGUS_FACE_DET_MODEL");
+        cfg.face_rec_model = env_path("ARGUS_FACE_REC_MODEL");
+        cfg.ocr_det_model = env_path("ARGUS_OCR_DET_MODEL");
+        cfg.ocr_rec_model = env_path("ARGUS_OCR_REC_MODEL");
+        cfg.ocr_dict = env_path("ARGUS_OCR_DICT");
+        cfg.plate_det_model = env_path("ARGUS_PLATE_DET_MODEL");
+        cfg.plate_rec_model = env_path("ARGUS_PLATE_REC_MODEL");
+        cfg.qr_model = env_path("ARGUS_QR_MODEL");
+        cfg.pose_model = env_path("ARGUS_POSE_MODEL");
+        cfg.depth_model = env_path("ARGUS_DEPTH_MODEL");
+        cfg.human_parsing_model = env_path("ARGUS_HUMAN_PARSING_MODEL");
 
         for cap in CAPABILITY_KEYS {
-            if let Some(size) = env::var(format!("VISION_EXT_{}_WARMUP_SIZE", cap.to_uppercase()))
+            if let Some(size) = env::var(format!("ARGUS_{}_WARMUP_SIZE", cap.to_uppercase()))
                 .ok()
                 .and_then(|v| parse_wxh(&v))
             {
@@ -188,7 +188,7 @@ impl Config {
             }
             // 池 0 会构造空实例池（EnginePool 构造 panic），非数字解析失败——
             // 两者都视为未设置，回退全局
-            if let Some(n) = env::var(format!("VISION_EXT_{}_POOL", cap.to_uppercase()))
+            if let Some(n) = env::var(format!("ARGUS_{}_POOL", cap.to_uppercase()))
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n >= 1)
@@ -197,7 +197,7 @@ impl Config {
             }
         }
 
-        let whitelist: Option<Vec<String>> = env::var("VISION_EXT_ENABLED_CAPABILITIES")
+        let whitelist: Option<Vec<String>> = env::var("ARGUS_ENABLED_CAPABILITIES")
             .ok()
             .filter(|s| !s.is_empty())
             .map(|s| {
@@ -291,12 +291,12 @@ mod tests {
     fn from_env_should_override_shutdown_timeout() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS", "30");
+            env::set_var("ARGUS_SHUTDOWN_TIMEOUT_SECS", "30");
         }
         let config = Config::from_env();
         assert_eq!(config.shutdown_timeout_secs, 30);
         unsafe {
-            env::remove_var("VISION_EXT_SHUTDOWN_TIMEOUT_SECS");
+            env::remove_var("ARGUS_SHUTDOWN_TIMEOUT_SECS");
         }
     }
 
@@ -316,12 +316,12 @@ mod tests {
     fn from_env_should_override_gpu_mem_limit() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_GPU_MEM_LIMIT_MB", "4096");
+            env::set_var("ARGUS_GPU_MEM_LIMIT_MB", "4096");
         }
         let config = Config::from_env();
         assert_eq!(config.gpu_mem_limit_mb, 4096);
         unsafe {
-            env::remove_var("VISION_EXT_GPU_MEM_LIMIT_MB");
+            env::remove_var("ARGUS_GPU_MEM_LIMIT_MB");
         }
     }
 
@@ -329,12 +329,12 @@ mod tests {
     fn from_env_should_override_acquire_timeout() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ACQUIRE_TIMEOUT_MS", "5000");
+            env::set_var("ARGUS_ACQUIRE_TIMEOUT_MS", "5000");
         }
         let config = Config::from_env();
         assert_eq!(config.acquire_timeout_ms, 5000);
         unsafe {
-            env::remove_var("VISION_EXT_ACQUIRE_TIMEOUT_MS");
+            env::remove_var("ARGUS_ACQUIRE_TIMEOUT_MS");
         }
     }
 
@@ -343,12 +343,12 @@ mod tests {
         // 0 = try_acquire fail-fast(生产 GPU 防 arena 雪崩)
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ACQUIRE_TIMEOUT_MS", "0");
+            env::set_var("ARGUS_ACQUIRE_TIMEOUT_MS", "0");
         }
         let config = Config::from_env();
         assert_eq!(config.acquire_timeout_ms, 0, "0 必须原样保留(fail-fast 语义)");
         unsafe {
-            env::remove_var("VISION_EXT_ACQUIRE_TIMEOUT_MS");
+            env::remove_var("ARGUS_ACQUIRE_TIMEOUT_MS");
         }
     }
 
@@ -356,10 +356,10 @@ mod tests {
     fn from_env_should_override_defaults() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_PORT", "8080");
-            env::set_var("VISION_EXT_DEVICE", "CUDA");
-            env::set_var("VISION_EXT_AUTH_TOKEN", "secret-key-123");
-            env::set_var("VISION_EXT_DETECTION_MODEL", "/models/yolo.onnx");
+            env::set_var("ARGUS_PORT", "8080");
+            env::set_var("ARGUS_DEVICE", "CUDA");
+            env::set_var("ARGUS_AUTH_TOKEN", "secret-key-123");
+            env::set_var("ARGUS_DETECTION_MODEL", "/models/yolo.onnx");
         }
         let config = Config::from_env();
         assert_eq!(config.port, 8080);
@@ -370,10 +370,10 @@ mod tests {
             Some(std::path::Path::new("/models/yolo.onnx"))
         );
         unsafe {
-            env::remove_var("VISION_EXT_PORT");
-            env::remove_var("VISION_EXT_DEVICE");
-            env::remove_var("VISION_EXT_AUTH_TOKEN");
-            env::remove_var("VISION_EXT_DETECTION_MODEL");
+            env::remove_var("ARGUS_PORT");
+            env::remove_var("ARGUS_DEVICE");
+            env::remove_var("ARGUS_AUTH_TOKEN");
+            env::remove_var("ARGUS_DETECTION_MODEL");
         }
     }
 
@@ -381,7 +381,7 @@ mod tests {
     fn from_env_should_parse_classification_model() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_CLASSIFICATION_MODEL", "/models/yolov8n-cls.onnx");
+            env::set_var("ARGUS_CLASSIFICATION_MODEL", "/models/yolov8n-cls.onnx");
         }
         let config = Config::from_env();
         assert_eq!(
@@ -390,7 +390,7 @@ mod tests {
         );
         assert!(config.configured_engines().contains(&"classification"));
         unsafe {
-            env::remove_var("VISION_EXT_CLASSIFICATION_MODEL");
+            env::remove_var("ARGUS_CLASSIFICATION_MODEL");
         }
     }
 
@@ -398,12 +398,12 @@ mod tests {
     fn from_env_should_ignore_empty_auth_token() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_AUTH_TOKEN", "");
+            env::set_var("ARGUS_AUTH_TOKEN", "");
         }
         let config = Config::from_env();
         assert!(config.auth_token.is_none());
         unsafe {
-            env::remove_var("VISION_EXT_AUTH_TOKEN");
+            env::remove_var("ARGUS_AUTH_TOKEN");
         }
     }
 
@@ -413,7 +413,7 @@ mod tests {
     fn from_env_should_parse_ocr_warmup_size() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_OCR_WARMUP_SIZE", "320x320");
+            env::set_var("ARGUS_OCR_WARMUP_SIZE", "320x320");
         }
         let config = Config::from_env();
         assert_eq!(
@@ -422,7 +422,7 @@ mod tests {
             "OCR 预热应用小图 dummy，避免 960 全零图触发大量伪区域"
         );
         unsafe {
-            env::remove_var("VISION_EXT_OCR_WARMUP_SIZE");
+            env::remove_var("ARGUS_OCR_WARMUP_SIZE");
         }
     }
 
@@ -442,7 +442,7 @@ mod tests {
     fn warmup_size_should_be_per_capability() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_OCR_WARMUP_SIZE", "320x320");
+            env::set_var("ARGUS_OCR_WARMUP_SIZE", "320x320");
         }
         let config = Config::from_env();
         assert_eq!(
@@ -451,7 +451,7 @@ mod tests {
             "OCR 的覆盖不得泄漏到其他能力"
         );
         unsafe {
-            env::remove_var("VISION_EXT_OCR_WARMUP_SIZE");
+            env::remove_var("ARGUS_OCR_WARMUP_SIZE");
         }
     }
 
@@ -459,22 +459,22 @@ mod tests {
     fn from_env_should_ignore_malformed_warmup_size() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_OCR_WARMUP_SIZE", "abc");
+            env::set_var("ARGUS_OCR_WARMUP_SIZE", "abc");
         }
         let config = Config::from_env();
         assert_eq!(config.warmup_size_for("ocr"), None, "非法值应回退默认");
         unsafe {
-            env::remove_var("VISION_EXT_OCR_WARMUP_SIZE");
+            env::remove_var("ARGUS_OCR_WARMUP_SIZE");
         }
     }
 
-    // ---- 单能力独立设池（§3.2：VISION_EXT_<CAP>_POOL 覆盖全局 ENGINE_POOL） ----
+    // ---- 单能力独立设池（§3.2：ARGUS_<CAP>_POOL 覆盖全局 ENGINE_POOL） ----
 
     #[test]
     fn pool_for_should_fall_back_to_global_when_per_cap_unset() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ENGINE_POOL", "4");
+            env::set_var("ARGUS_ENGINE_POOL", "4");
         }
         let config = Config::from_env();
         assert_eq!(
@@ -483,7 +483,7 @@ mod tests {
             "未设置能力级池时必须回退全局 engine_pool（零回归默认）"
         );
         unsafe {
-            env::remove_var("VISION_EXT_ENGINE_POOL");
+            env::remove_var("ARGUS_ENGINE_POOL");
         }
     }
 
@@ -491,8 +491,8 @@ mod tests {
     fn per_cap_pool_should_override_global_pool() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ENGINE_POOL", "4");
-            env::set_var("VISION_EXT_OCR_POOL", "1");
+            env::set_var("ARGUS_ENGINE_POOL", "4");
+            env::set_var("ARGUS_OCR_POOL", "1");
         }
         let config = Config::from_env();
         assert_eq!(
@@ -500,8 +500,8 @@ mod tests {
             "OCR/HUMAN_PARSING/DEPTH 池=1 是内存止血的关键杠杆（12.4GB→约 4GB）"
         );
         unsafe {
-            env::remove_var("VISION_EXT_ENGINE_POOL");
-            env::remove_var("VISION_EXT_OCR_POOL");
+            env::remove_var("ARGUS_ENGINE_POOL");
+            env::remove_var("ARGUS_OCR_POOL");
         }
     }
 
@@ -509,14 +509,14 @@ mod tests {
     fn per_cap_pool_should_not_leak_to_other_capabilities() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ENGINE_POOL", "4");
-            env::set_var("VISION_EXT_OCR_POOL", "1");
+            env::set_var("ARGUS_ENGINE_POOL", "4");
+            env::set_var("ARGUS_OCR_POOL", "1");
         }
         let config = Config::from_env();
         assert_eq!(config.pool_for("depth"), 4, "OCR 的覆盖不得影响 depth");
         unsafe {
-            env::remove_var("VISION_EXT_ENGINE_POOL");
-            env::remove_var("VISION_EXT_OCR_POOL");
+            env::remove_var("ARGUS_ENGINE_POOL");
+            env::remove_var("ARGUS_OCR_POOL");
         }
     }
 
@@ -525,21 +525,21 @@ mod tests {
         // 池 0 会构造空实例池（EnginePool 构造 panic），必须挡在解析层回退全局
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ENGINE_POOL", "2");
-            env::set_var("VISION_EXT_DEPTH_POOL", "0");
-            env::set_var("VISION_EXT_HUMAN_PARSING_POOL", "x");
+            env::set_var("ARGUS_ENGINE_POOL", "2");
+            env::set_var("ARGUS_DEPTH_POOL", "0");
+            env::set_var("ARGUS_HUMAN_PARSING_POOL", "x");
         }
         let config = Config::from_env();
         assert_eq!(config.pool_for("depth"), 2, "0 非法，回退全局");
         assert_eq!(config.pool_for("human_parsing"), 2, "非数字非法，回退全局");
         unsafe {
-            env::remove_var("VISION_EXT_ENGINE_POOL");
-            env::remove_var("VISION_EXT_DEPTH_POOL");
-            env::remove_var("VISION_EXT_HUMAN_PARSING_POOL");
+            env::remove_var("ARGUS_ENGINE_POOL");
+            env::remove_var("ARGUS_DEPTH_POOL");
+            env::remove_var("ARGUS_HUMAN_PARSING_POOL");
         }
     }
 
-    // ---- 能力白名单（§3.3：VISION_EXT_ENABLED_CAPABILITIES） ----
+    // ---- 能力白名单（§3.3：ARGUS_ENABLED_CAPABILITIES） ----
 
     #[test]
     fn capability_enabled_should_default_to_all_when_unset() {
@@ -556,7 +556,7 @@ mod tests {
     fn from_env_should_parse_enabled_capabilities() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ENABLED_CAPABILITIES", "detection,ocr");
+            env::set_var("ARGUS_ENABLED_CAPABILITIES", "detection,ocr");
         }
         let config = Config::from_env();
         assert!(config.capability_enabled("detection"));
@@ -566,7 +566,7 @@ mod tests {
             "白名单外能力必须被拒绝加载"
         );
         unsafe {
-            env::remove_var("VISION_EXT_ENABLED_CAPABILITIES");
+            env::remove_var("ARGUS_ENABLED_CAPABILITIES");
         }
     }
 
@@ -574,7 +574,7 @@ mod tests {
     fn enabled_capabilities_should_trim_spaces_and_drop_unknown_keys() {
         let _guard = env_lock();
         unsafe {
-            env::set_var("VISION_EXT_ENABLED_CAPABILITIES", " ocr , bogus_cap ");
+            env::set_var("ARGUS_ENABLED_CAPABILITIES", " ocr , bogus_cap ");
         }
         let config = Config::from_env();
         assert!(
@@ -586,7 +586,7 @@ mod tests {
             "未知键不是合法能力名，不得意外生效"
         );
         unsafe {
-            env::remove_var("VISION_EXT_ENABLED_CAPABILITIES");
+            env::remove_var("ARGUS_ENABLED_CAPABILITIES");
         }
     }
 }

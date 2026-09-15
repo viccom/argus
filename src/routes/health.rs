@@ -94,7 +94,7 @@ pub async fn service_info(
         return axum::response::Redirect::to("/ui").into_response();
     }
     Json(json!({
-        "service": "vision-ext",
+        "service": "argus",
         "version": crate::version::version_string(),
         "uptime_s": state.started_at.elapsed().as_secs(),
         "endpoints": {
@@ -199,7 +199,7 @@ mod tests {
             .await
             .unwrap();
         let text = body_text(resp).await;
-        assert!(text.contains("vision-ext"), "应包含服务名: {text}");
+        assert!(text.contains("argus"), "应包含服务名: {text}");
         assert!(text.contains("/detect"), "应列出端点: {text}");
         assert!(text.contains("/face"), "应列出人脸端点: {text}");
         assert!(text.contains("/ocr"), "应列出 OCR 端点: {text}");
@@ -289,7 +289,7 @@ mod tests {
             .unwrap_or_default();
         assert!(ct.contains("text/html"), "应为 HTML: {ct}");
         let text = body_text(resp).await;
-        assert!(text.contains("vision-ext"), "页面应含服务标识: {text}");
+        assert!(text.contains("argus"), "页面应含服务标识: {text}");
     }
 
     #[tokio::test]
@@ -328,7 +328,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let text = body_text(resp).await;
-        assert!(text.contains("vision-ext"), "非浏览器应返回 service_info JSON: {text}");
+        assert!(text.contains("argus"), "非浏览器应返回 service_info JSON: {text}");
     }
 
     #[tokio::test]

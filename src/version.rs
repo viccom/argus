@@ -3,13 +3,13 @@
 /// git hash 与 dirty 状态由 build.rs 在编译期探测注入（无 git 环境时为 "unknown"），
 /// 使部署实例可通过 `/health`、`/` 与启动/停机日志精确定位到构建来源。
 pub fn version_string() -> String {
-    let dirty = env!("VISION_EXT_DIRTY");
+    let dirty = env!("ARGUS_DIRTY");
     let dirty_mark = if dirty.is_empty() { "" } else { "+dirty" };
     format!(
         "{} {} (git {}{})",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
-        env!("VISION_EXT_GIT_HASH"),
+        env!("ARGUS_GIT_HASH"),
         dirty_mark
     )
 }
@@ -24,7 +24,7 @@ mod tests {
         assert!(v.contains(env!("CARGO_PKG_VERSION")), "应含包版本: {v}");
         assert!(v.contains("git"), "应含 git 标识: {v}");
         assert!(
-            v.contains(env!("VISION_EXT_GIT_HASH")),
+            v.contains(env!("ARGUS_GIT_HASH")),
             "应含编译期注入的 git hash: {v}"
         );
     }
@@ -32,7 +32,7 @@ mod tests {
     #[test]
     fn version_string_should_mark_dirty_build() {
         // dirty 标记与编译期状态一致：非空时必须出现 +dirty 后缀
-        if !env!("VISION_EXT_DIRTY").is_empty() {
+        if !env!("ARGUS_DIRTY").is_empty() {
             assert!(version_string().contains("+dirty"));
         }
     }

@@ -1,5 +1,5 @@
 [package]
-name = "vision-ext"
+name = "argus"
 version = "0.1.0"
 edition = "2021"
 description = "工业视觉智能 HTTP 服务（基于 rust-onnx-infer）"

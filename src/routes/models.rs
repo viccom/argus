@@ -1,7 +1,7 @@
 //! `GET /models` — 能力键控的模型清单（配置态 / 加载态 / 模型文件名）。
 //!
 //! **与 yolo-rs 的 `/models` 语义不同，勿照抄**：yolo-rs 的 models 目录专供检测
-//! 模型，"目录扫描任意 *.onnx 即可用"成立；vision-ext 的 models/ 混装检测、分类、
+//! 模型，"目录扫描任意 *.onnx 即可用"成立；argus 的 models/ 混装检测、分类、
 //! OCR、分割等异构模型，naive 目录扫描会把 segformer/ppocr 之类全报成"可互换的
 //! 检测模型"——对消费方说谎。故按**能力**键控输出，每项给出该能力实际使用的
 //! 模型文件（文件名去扩展名）。
@@ -24,7 +24,7 @@ use crate::routes::health::AppState;
 pub struct CapabilityModels {
     /// 该能力所需的全部模型路径均已配置（缺任一即 false，引擎无法加载）。
     pub configured: bool,
-    /// 在 `VISION_EXT_ENABLED_CAPABILITIES` 白名单内（未设置白名单 = 恒 true）。
+    /// 在 `ARGUS_ENABLED_CAPABILITIES` 白名单内（未设置白名单 = 恒 true）。
     /// 白名单外的能力在 loader 入口即被拒绝，永远不会加载。
     pub enabled: bool,
     /// 引擎实例已创建（`OnceCell` 已初始化）。

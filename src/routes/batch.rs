@@ -5,7 +5,7 @@
 //!
 //! 与 yolo-rs 差异（吸收计划阶段 3 明确要求）：
 //! - **错误隔离**：单图失败该条目带 `error`，不炸整批（yolo-rs 是 `?` 直接中断）；
-//! - **每图独立背压 permit**：过载时按 `VISION_EXT_ACQUIRE_TIMEOUT_MS` 语义排队或 fail-fast；
+//! - **每图独立背压 permit**：过载时按 `ARGUS_ACQUIRE_TIMEOUT_MS` 语义排队或 fail-fast；
 //! - `model` 参数待动态模型管理（吸收计划阶段 2），传入即拒绝而非静默忽略。
 
 use axum::extract::rejection::JsonRejection;

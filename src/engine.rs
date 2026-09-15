@@ -118,7 +118,7 @@ impl EngineManager {
         }
     }
 
-    /// 白名单强制点(§3.3):不在 `VISION_EXT_ENABLED_CAPABILITIES` 白名单的能力,
+    /// 白名单强制点(§3.3):不在 `ARGUS_ENABLED_CAPABILITIES` 白名单的能力,
     /// 在读取模型路径/触碰文件系统之前即拒绝,与"模型未配置"区分。
     fn ensure_enabled(&self, capability: &str) -> Result<(), AppError> {
         if self.config.capability_enabled(capability) {
@@ -604,7 +604,7 @@ fn dummy_image(w: i32, h: i32) -> rust_onnx_infer::Image {
 
 /// 引擎预热 helper:构造零张量,对池内每实例跑 dummy 推理。
 ///
-/// `override_size` 覆盖 dummy 尺寸(来自 `VISION_EXT_<CAP>_WARMUP_SIZE`),None 沿用
+/// `override_size` 覆盖 dummy 尺寸(来自 `ARGUS_<CAP>_WARMUP_SIZE`),None 沿用
 /// 引擎 `input_size`。OCR 必须用小图:960 全零 dummy 实测 20.4s/实例(det 大量伪区域
 /// + rec 批前向),320 小图 0.43s/实例,首个真实请求推理不变。
 ///

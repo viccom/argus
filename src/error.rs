@@ -14,7 +14,7 @@ pub enum AppError {
     #[error("模型未配置: {0}（请在环境变量中设置对应模型路径）")]
     ModelNotConfigured(String),
 
-    #[error("能力未启用: {0}（不在 VISION_EXT_ENABLED_CAPABILITIES 白名单中）")]
+    #[error("能力未启用: {0}（不在 ARGUS_ENABLED_CAPABILITIES 白名单中）")]
     CapabilityDisabled(String),
 
     #[error("推理失败: {0}")]

@@ -51,7 +51,7 @@ pub(crate) async fn decode_image(bytes: Vec<u8>) -> Result<Image, AppError> {
 
 /// 获取推理许可（全局并发背压信号量）。
 ///
-/// 超时由 `VISION_EXT_ACQUIRE_TIMEOUT_MS` 控制（默认 30000ms 排队式）：
+/// 超时由 `ARGUS_ACQUIRE_TIMEOUT_MS` 控制（默认 30000ms 排队式）：
 /// - `> 0`：在信号量上等待,超时返回 Overload(内网低负载排队更友好);
 /// - `0`：try_acquire fail-fast——耗尽即拒,不排队(生产 GPU 防 arena 雪崩,
 ///   与 max_concurrent=pool_size 对齐)。
