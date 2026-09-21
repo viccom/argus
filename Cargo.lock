@@ -79,6 +79,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "image",
+ "rust-onnx-infer",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,7 +2123,7 @@ dependencies = [
 [[package]]
 name = "rust-onnx-infer"
 version = "0.2.0"
-source = "git+https://github.com/viccom/rust-onnx-infer.git?branch=master#0c783f313d33651109d910d284caa7d717407fce"
+source = "git+https://github.com/viccom/rust-onnx-infer.git?branch=master#01f66db70a0b53338e172eb307ca9bd78cec2241"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2832,23 +2849,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vision-ext"
-version = "0.1.0"
-dependencies = [
- "axum",
- "image",
- "rust-onnx-infer",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "wasi"
