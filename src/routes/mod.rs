@@ -7,5 +7,6 @@ pub mod detection;
 pub mod face;
 pub mod health;
 pub mod models;
+pub mod reid;
 pub mod text;
 pub mod ui;

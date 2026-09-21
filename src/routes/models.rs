@@ -57,7 +57,7 @@ fn cap(model_paths: &[&Option<PathBuf>], configured: bool, enabled: bool, loaded
 /// `Config::configured_engines` 的命名一致）。
 fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
     let on = |name: &str| loaded.contains(&name);
-    let entries: [(&str, CapabilityModels); 11] = [
+    let entries: [(&str, CapabilityModels); 12] = [
         (
             "detection",
             cap(
@@ -92,6 +92,14 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.face_rec_model],
                 config.face_rec_model.is_some(),
                 config.capability_enabled("face_recognition"), on("face_recognition"),
+            ),
+        ),
+        (
+            "reid",
+            cap(
+                &[&config.reid_model],
+                config.reid_model.is_some(),
+                config.capability_enabled("reid"), on("reid"),
             ),
         ),
         (
@@ -177,6 +185,7 @@ mod tests {
             match *key {
                 "detection" => config.detection_model = p,
                 "classification" => config.classification_model = p,
+                "reid" => config.reid_model = p,
                 "ocr_det" => config.ocr_det_model = p,
                 "ocr_rec" => config.ocr_rec_model = p,
                 "ocr_dict" => config.ocr_dict = p,
@@ -197,8 +206,8 @@ mod tests {
         let caps = capability_models(&Config::default(), &[]);
         assert_eq!(
             caps.len(),
-            11,
-            "应有 11 项能力: {:?}",
+            12,
+            "应有 12 项能力: {:?}",
             caps.keys().collect::<Vec<_>>()
         );
         for (name, value) in &caps {
@@ -216,6 +225,15 @@ mod tests {
         assert!(cm.configured);
         assert_eq!(cm.models, ["yolov8n"], "应为去扩展名的文件名（不含目录）");
         assert!(!cm.loaded, "未加载态由 EngineManager 决定，此处应为 false");
+    }
+
+    #[test]
+    fn reid_configured_should_expose_model_stem() {
+        let config = paths(&[("reid", Some("/models/osnet_x1_0.onnx"))]);
+        let cm = cap_of(&capability_models(&config, &[]), "reid");
+        assert!(cm.configured);
+        assert_eq!(cm.models, ["osnet_x1_0"]);
+        assert!(config.configured_engines().contains(&"reid"));
     }
 
     #[test]

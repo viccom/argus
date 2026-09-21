@@ -5,8 +5,8 @@ use std::path::PathBuf;
 /// 能力键全集（规范名，与 `/models`、`EngineManager::list_loaded`、`configured_engines`
 /// 一致）。按能力覆盖的 env（预热尺寸、池大小等）一律以能力键大写为后缀，
 /// 不引入第三套命名；与模型路径 env（`FACE_DET` 等）的差异在 README 记录。
-pub const CAPABILITY_KEYS: [&str; 11] = [
-    "detection", "classification", "obb", "face_detection", "face_recognition",
+pub const CAPABILITY_KEYS: [&str; 12] = [
+    "detection", "classification", "obb", "face_detection", "face_recognition", "reid",
     "ocr", "license_plate", "qr", "pose", "depth", "human_parsing",
 ];
 
@@ -46,6 +46,8 @@ pub struct Config {
     pub face_det_model: Option<PathBuf>,
     /// 人脸识别模型路径（SFace/ArcFace）。
     pub face_rec_model: Option<PathBuf>,
+    /// 行人重识别模型路径（OSNet x1.0,512 维 embedding）。
+    pub reid_model: Option<PathBuf>,
     /// OCR 检测模型路径。
     pub ocr_det_model: Option<PathBuf>,
     /// OCR 识别模型路径。
@@ -97,6 +99,7 @@ impl Default for Config {
             obb_model: None,
             face_det_model: None,
             face_rec_model: None,
+            reid_model: None,
             ocr_det_model: None,
             ocr_rec_model: None,
             ocr_dict: None,
@@ -169,6 +172,7 @@ impl Config {
         cfg.obb_model = env_path("ARGUS_OBB_MODEL");
         cfg.face_det_model = env_path("ARGUS_FACE_DET_MODEL");
         cfg.face_rec_model = env_path("ARGUS_FACE_REC_MODEL");
+        cfg.reid_model = env_path("ARGUS_REID_MODEL");
         cfg.ocr_det_model = env_path("ARGUS_OCR_DET_MODEL");
         cfg.ocr_rec_model = env_path("ARGUS_OCR_REC_MODEL");
         cfg.ocr_dict = env_path("ARGUS_OCR_DICT");
@@ -240,6 +244,7 @@ impl Config {
         if self.obb_model.is_some() { v.push("obb"); }
         if self.face_det_model.is_some() { v.push("face_detection"); }
         if self.face_rec_model.is_some() { v.push("face_recognition"); }
+        if self.reid_model.is_some() { v.push("reid"); }
         if self.ocr_det_model.is_some() { v.push("ocr"); }
         if self.plate_det_model.is_some() { v.push("license_plate"); }
         if self.qr_model.is_some() { v.push("qr"); }
@@ -374,6 +379,23 @@ mod tests {
             env::remove_var("ARGUS_DEVICE");
             env::remove_var("ARGUS_AUTH_TOKEN");
             env::remove_var("ARGUS_DETECTION_MODEL");
+        }
+    }
+
+    #[test]
+    fn from_env_should_parse_reid_model() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_REID_MODEL", "/models/osnet_x1_0.onnx");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.reid_model.as_deref(),
+            Some(std::path::Path::new("/models/osnet_x1_0.onnx"))
+        );
+        assert!(config.configured_engines().contains(&"reid"));
+        unsafe {
+            env::remove_var("ARGUS_REID_MODEL");
         }
     }
 

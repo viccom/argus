@@ -21,9 +21,22 @@
 | ID | 任务 | 形态 | 模型来源 | 状态 | 验证证据 | 日期 |
 |---|---|---|---|---|---|---|
 | 1 | classification 纵切片模板(后续引擎按此复制) | G1 同构 | yolov8n-cls.onnx(Ultralytics v8.3.0 .pt → onnx opset12/224 官方导出) | ✅ | 前置门:magic 0x08/shape [1,3,224,224]×[1,1000]/ORT 直跑 softmax sum=1.0/bus.jpg top1=minibus 0.576;TDD:config+engine+routes 3 轮先红后绿;E2E:curl /classify top1=minibus 0.581(与 python 参照 0.583 一致),top_k=2/错误路径全过;附带修复上游 resize 混叠 bug(见 2026-09-10 变更记录);测试 73→80 全绿 | 2026-09-10 |
-| 2 | reid 行人重识别(OSNet 512 维) | G1,embedding 契约同 face_rec | 待获取 | ⬜ | | |
-| 3 | segmentation 实例分割 | G2 mask,DTO 复用 depth 下采样先例 | 待获取 | ⬜ | | |
+| 2 | reid 行人重识别(OSNet 512 维) | G1,embedding 契约同 face_rec | Qualcomm AI Hub `qualcomm/OSNet` v0.62.2(外置权重需内联,见 README 模型表) | ✅ | 前置门:magic 0x08/签名与引擎文档逐项一致(`image [1,3,256,128]`→`embeddings [1,512]`)/ORT 直跑随机输入 L2=1.0000;TDD:路由 9 测试(缺 file/坏图/未配置/boxes 坏 JSON/坐标数错/退化框/clamp 行为/DTO)先红后绿,`cargo test --jobs 6` 154+1 全绿,clippy 零警告;E2E(ad-hoc :7099 debug 实例):ppe_test.png 双人框 count=2/dim=512/两 embedding L2=1.0000/278ms,同一人框模式 vs 整图模式 cos=1.0000(契约一致),跨人 cos=0.691(两人同装束,合理);错误路径 200 信封 `data.error` 提示 boxes 解析细节 | 2026-09-21 |
+| 3 | segmentation 实例分割 | G2 mask,DTO 复用 depth 下采样先例 | `yolov8m-seg.onnx` 已本地导出入 models/(COCO 80 类,`[1,116,8400]`+proto,前置门过:bus.jpg person/bus 检出正常) | 🚧 模型就绪,路由/DTO 接入待做 | | |
 | 4 | face_attribute 年龄/性别/表情 | G3 组合式,复用 face_recognize 两段式模板 | 待获取 | ⬜ | | |
+
+### 批 1.5:场景批(2026-09-21 插入,按企业价值排序)
+
+> 背景:GPU(吸收计划阶段 4)暂缓;批 1 模型获取的网络阻塞已解除(2026-09-21 实测 hf-mirror/github 均 200,venv 具备 torch 2.14 + ultralytics 8.4 本地导出工具链)。按 safe_bot 隐患目录(10 类违章)对齐,PPE/火烟是高频刚需:两者**复用 DetectionEngine**(G1 模板,新能力槽位),无需等阶段 2 动态化。
+> 排序依据:与 safe_bot `hazard_catalog.json` 首类"个人防护用品违章"对齐(PPE)、动火违章前置(火烟);IQA/增强/姿态规则为上游存量 CPU 友好资产,直击工地摄像头画质与跌倒场景。
+
+| ID | 任务 | 形态 | 模型来源 | 状态 | 验证证据 | 日期 |
+|---|---|---|---|---|---|---|
+| 18 | ppe_detect 安全帽/反光衣检测(新能力槽,复用 DetectionEngine) | G1 | 已选定:Hansung-Cho/yolov8-ppe-detection(10 类含违章反类),`ppe_site_10cls.onnx` 已入 models/;qualcomm gear_guard_net 为三输出自定义头(boxes/scores/class_idx,非 v8 布局),复用 DetectionEngine 不可行,弃用 | 🚧 模型就绪,槽位接入待做 | 前置门:magic 0x08/标准布局 `[1,14,8400]`/真实工地照 8 检出(Hardhat 0.96/0.90,Safety Vest 0.93/0.70,NO-Mask 0.82/0.64,Person 0.90/0.87)/ORT 直跑 53 原始 anchor(NMS 前属正常)/像素域坐标 | 2026-09-21 |
+| 19 | fire_smoke_detect 火焰/烟雾检测(同上) | G1 | mfranzon/fire-smoke-yolov8(nano 级),`fire_smoke_2cls.onnx` 已入 models/ | 🚧 模型就绪,槽位接入待做;生产采用前建议比选更强模型 | 前置门:magic 0x08/标准布局 `[1,6,8400]`/正样本(房屋火灾)fire 0.521/负样本(bus.jpg)零检出 | 2026-09-21 |
+| 20 | image_quality 无参考画质评估(IQA) | G1 | 上游引擎已有,模型待查引擎文档 | ⬜ | | |
+| 21 | image_enhance 低光增强/去雾(检测前置) | G2 同尺寸 | 上游引擎已有,模型待查引擎文档 | ⬜ | | |
+| 22 | pose_rules 姿态几何规则(零模型,摔倒/举手) | G1 纯算法 | 无需模型(输入 pose 关键点) | ⬜ | | |
 
 ### 批 2:姿态/手部/人脸族
 
@@ -80,6 +93,8 @@
 
 ## 变更记录
 
+- 2026-09-21:插入批 1.5 场景批(PPE/火烟/IQA/增强/姿态规则),按企业价值排序。**方向修订**:GPU(吸收计划阶段 4)暂缓,主攻 CPU 线——批 1 解卡(网络已恢复)→ 场景批 → 跨帧跟踪 + 事件规则层(新工作流,另立方案)→ /metrics;阶段 2 动态化仍是唯一重构级合并点。同日完成上游 javpower 1c6ed67(OCR 旋转四边形)同步进 fork(01f66db)与 argus 依赖更新(ba3f83e),E2E 验证旋转文字识别恢复。
+- 2026-09-21:**批 1 解卡完成**:模型获取网络恢复(hf-mirror/github 实测 200,venv 具备 torch 2.14 + ultralytics 8.4 导出工具链);任务 2 reid 全三道门完成(端点 `/reid`,能力键 `reid`,CAPABILITY_KEYS 11→12);任务 3 segmentation 与批 1.5 任务 18/19 模型全部就绪入 `models/`(前置门过),接入待下批;qualcomm gear_guard_net 因三输出自定义头弃用(教训:AI Hub 模型多为自有头布局,接入前先 dump 输出 shape)。任务 4 face_attribute 模型来源已查实(README 引擎文档:PINTO zoo #070 + OMZ IR 两种布局引擎均兼容),待下载。
 - 2026-09-10:建表,16+1 项任务定稿,批 1 范围确认(classification/reid/segmentation/face_attribute)。
 - 2026-09-10:任务 1 classification 完成。模板沉淀:`routes/common.rs`(field_text/parse_field_text/decode_image/acquire_permit 公共工具,P2 挂账清偿)+ config/engine/routes 三层接入范式。**附带发现并修复 rust-onnx-infer 上游 resize bug**:`ResizeAlg::Interpolation` 固定核在大比率缩小(>2x)时跳过源像素(混叠,1080→224 分类置信度 0.58→0.38),改 `Convolution` 后 detect 结果也从混叠伪影 7 框收敛为标准 4 person+1 bus。回归测试 `linear_downscale_should_spread_impulse_energy`(旧算法红/新算法绿已对照验证)。上游修复未提交,待与下游一起定稿。
 - 2026-09-10:yolo-rs 吸收计划定稿(见 `yolo-rs-absorption-plan.md`),两线并行节奏确认。

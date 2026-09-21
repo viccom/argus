@@ -138,6 +138,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
         .route("/classify", post(crate::routes::classification::classify))
         .route("/face/detect", post(crate::routes::face::face_detect))
         .route("/face/recognize", post(crate::routes::face::face_recognize))
+        .route("/reid", post(crate::routes::reid::reid_embed))
         .route("/ocr", post(crate::routes::text::ocr))
         .route("/license-plate", post(crate::routes::text::license_plate))
         .route("/qr", post(crate::routes::text::qr))

@@ -13,7 +13,8 @@ use rust_onnx_infer::engines::license_plate::LicensePlateEngine;
 use rust_onnx_infer::engines::obb_detection::ObbDetectionEngine;
 use rust_onnx_infer::engines::ocr::OcrPipeline;
 use rust_onnx_infer::engines::qr_detector::QrDetector;
-use rust_onnx_infer::imaging::FloatMask;
+use rust_onnx_infer::engines::reid::ReidEngine;
+use rust_onnx_infer::imaging::{FloatMask, Rect};
 use rust_onnx_infer::model::PoseResult;
 use rust_onnx_infer::OnnxInferenceEngine;
 
@@ -90,6 +91,7 @@ pub struct EngineManager {
     obb: tokio::sync::OnceCell<Arc<EnginePool<ObbDetectionEngine>>>,
     face_det: tokio::sync::OnceCell<Arc<EnginePool<DynFaceDet>>>,
     face_rec: tokio::sync::OnceCell<Arc<EnginePool<FaceRecognitionEngine>>>,
+    reid: tokio::sync::OnceCell<Arc<EnginePool<ReidEngine>>>,
     ocr: tokio::sync::OnceCell<Arc<EnginePool<OcrPipeline>>>,
     plate: tokio::sync::OnceCell<Arc<EnginePool<LicensePlateEngine>>>,
     qr: tokio::sync::OnceCell<Arc<EnginePool<QrDetector>>>,
@@ -109,6 +111,7 @@ impl EngineManager {
             obb: tokio::sync::OnceCell::new(),
             face_det: tokio::sync::OnceCell::new(),
             face_rec: tokio::sync::OnceCell::new(),
+            reid: tokio::sync::OnceCell::new(),
             ocr: tokio::sync::OnceCell::new(),
             plate: tokio::sync::OnceCell::new(),
             qr: tokio::sync::OnceCell::new(),
@@ -136,6 +139,7 @@ impl EngineManager {
         if self.obb.initialized() { loaded.push("obb"); }
         if self.face_det.initialized() { loaded.push("face_detection"); }
         if self.face_rec.initialized() { loaded.push("face_recognition"); }
+        if self.reid.initialized() { loaded.push("reid"); }
         if self.ocr.initialized() { loaded.push("ocr"); }
         if self.plate.initialized() { loaded.push("license_plate"); }
         if self.qr.initialized() { loaded.push("qr"); }
@@ -156,6 +160,7 @@ impl EngineManager {
         check_engine!(self.obb, "obb", ObbDetectionEngine, results);
         check_engine!(self.face_det, "face_detection", DynFaceDet, results);
         check_engine!(self.face_rec, "face_recognition", FaceRecognitionEngine, results);
+        check_engine!(self.reid, "reid", ReidEngine, results);
         check_engine!(self.ocr, "ocr", OcrPipeline, results);
         check_engine!(self.plate, "license_plate", LicensePlateEngine, results);
         check_engine!(self.qr, "qr", QrDetector, results);
@@ -304,6 +309,38 @@ impl EngineManager {
                 tracing::info!("引擎 face_recognition 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
                 warmup_engine("face_recognition", &pool, self.config.warmup_size_for("face_recognition"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
+            })
+            .await
+            .cloned()
+    }
+
+    pub async fn reid(&self) -> Result<Arc<EnginePool<ReidEngine>>, AppError> {
+        self.reid
+            .get_or_try_init(|| async {
+                self.ensure_enabled("reid")?;
+                let path = self.config.reid_model.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("reid".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
+                let device = self.device;
+                let pool_size = self.config.pool_for("reid");
+                let mut engines = Vec::with_capacity(pool_size);
+                for _ in 0..pool_size {
+                    let p = path.clone();
+                    let engine = tokio::task::spawn_blocking(move || {
+                        ReidEngine::new(&p, device)
+                    })
+                    .await
+                    .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                    engines.push(Arc::new(engine));
+                }
+                tracing::info!("引擎 reid 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("reid", &pool, self.config.warmup_size_for("reid"), |e, w, h| {
+                    e.embed(&dummy_image(w, h), Rect::new(0, 0, w, h)).map(|_| ())
+                })
+                .await;
                 Ok(pool)
             })
             .await
@@ -645,6 +682,10 @@ impl OnnxInferPredict for ObbDetectionEngine {
 }
 impl OnnxInferPredict for FaceRecognitionEngine {
     fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
+}
+impl OnnxInferPredict for ReidEngine {
+    // OSNet x1.0 静态输入 128x256(W,H),与模型文件绑定,不取自 session
+    fn input_size(&self) -> (i32, i32) { (128, 256) }
 }
 impl OnnxInferPredict for LicensePlateEngine {
     fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
