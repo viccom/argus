@@ -57,13 +57,29 @@ fn cap(model_paths: &[&Option<PathBuf>], configured: bool, enabled: bool, loaded
 /// `Config::configured_engines` 的命名一致）。
 fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
     let on = |name: &str| loaded.contains(&name);
-    let entries: [(&str, CapabilityModels); 12] = [
+    let entries: [(&str, CapabilityModels); 15] = [
         (
             "detection",
             cap(
                 &[&config.detection_model],
                 config.detection_model.is_some(),
                 config.capability_enabled("detection"), on("detection"),
+            ),
+        ),
+        (
+            "ppe",
+            cap(
+                &[&config.ppe_model],
+                config.ppe_model.is_some(),
+                config.capability_enabled("ppe"), on("ppe"),
+            ),
+        ),
+        (
+            "fire_smoke",
+            cap(
+                &[&config.fire_smoke_model],
+                config.fire_smoke_model.is_some(),
+                config.capability_enabled("fire_smoke"), on("fire_smoke"),
             ),
         ),
         (
@@ -77,6 +93,14 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
         (
             "obb",
             cap(&[&config.obb_model], config.obb_model.is_some(), config.capability_enabled("obb"), on("obb")),
+        ),
+        (
+            "segmentation",
+            cap(
+                &[&config.segmentation_model],
+                config.segmentation_model.is_some(),
+                config.capability_enabled("segmentation"), on("segmentation"),
+            ),
         ),
         (
             "face_detection",
@@ -184,8 +208,11 @@ mod tests {
             let p = value.map(PathBuf::from);
             match *key {
                 "detection" => config.detection_model = p,
+                "ppe" => config.ppe_model = p,
+                "fire_smoke" => config.fire_smoke_model = p,
                 "classification" => config.classification_model = p,
                 "reid" => config.reid_model = p,
+                "segmentation" => config.segmentation_model = p,
                 "ocr_det" => config.ocr_det_model = p,
                 "ocr_rec" => config.ocr_rec_model = p,
                 "ocr_dict" => config.ocr_dict = p,
@@ -206,8 +233,8 @@ mod tests {
         let caps = capability_models(&Config::default(), &[]);
         assert_eq!(
             caps.len(),
-            12,
-            "应有 12 项能力: {:?}",
+            15,
+            "应有 15 项能力: {:?}",
             caps.keys().collect::<Vec<_>>()
         );
         for (name, value) in &caps {

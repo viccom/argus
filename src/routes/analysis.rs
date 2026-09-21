@@ -111,32 +111,7 @@ impl From<&FloatMask> for DepthDto {
         }
         let mean = if data.is_empty() { 0.0 } else { sum / data.len() as f32 };
 
-        // 下采样到最多 64x64
-        let target = 64usize;
-        let step_w = (w + target - 1) / target.max(1);
-        let step_h = (h + target - 1) / target.max(1);
-        let mut preview = Vec::new();
-        let step_w = step_w.max(1);
-        let step_h = step_h.max(1);
-        let mut y = 0;
-        while y < h {
-            let mut x = 0;
-            while x < w {
-                let mut s = 0.0;
-                let mut n = 0;
-                let y_end = (y + step_h).min(h);
-                let x_end = (x + step_w).min(w);
-                for yy in y..y_end {
-                    for xx in x..x_end {
-                        s += data[yy * w + xx];
-                        n += 1;
-                    }
-                }
-                preview.push(if n > 0 { s / n as f32 } else { 0.0 });
-                x += step_w;
-            }
-            y += step_h;
-        }
+        let (preview, preview_cols) = downsample_grid(data, w, h, 64);
 
         Self {
             width: w,
@@ -144,10 +119,43 @@ impl From<&FloatMask> for DepthDto {
             min,
             max,
             mean,
-            preview_cols: w.div_ceil(step_w),
+            preview_cols,
             preview,
         }
     }
+}
+
+/// 二维 float 网格均值池化下采样到最多 target×target 的预览(行优先扁平)。
+/// 返回 (preview, cols);cols 是重建网格必需(非方形网格不能从 len 推断)。
+pub(crate) fn downsample_grid(
+    data: &[f32],
+    w: usize,
+    h: usize,
+    target: usize,
+) -> (Vec<f32>, usize) {
+    let step_w = ((w + target - 1) / target.max(1)).max(1);
+    let step_h = ((h + target - 1) / target.max(1)).max(1);
+    let mut preview = Vec::new();
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            let mut s = 0.0;
+            let mut n = 0;
+            let y_end = (y + step_h).min(h);
+            let x_end = (x + step_w).min(w);
+            for yy in y..y_end {
+                for xx in x..x_end {
+                    s += data[yy * w + xx];
+                    n += 1;
+                }
+            }
+            preview.push(if n > 0 { s / n as f32 } else { 0.0 });
+            x += step_w;
+        }
+        y += step_h;
+    }
+    (preview, w.div_ceil(step_w))
 }
 
 #[derive(Serialize)]

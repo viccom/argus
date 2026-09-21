@@ -10,6 +10,9 @@
 | `POST /detect/batch` | 逐图批量检测（JSON `image_paths` 为**服务端本地路径**；单图失败带 `error` 不炸整批，每图独立背压 permit；过滤参数同 `/detect`） | YOLO |
 | `POST /classify` | 图像分类 Top-K（`top_k`，默认 5，上限 50） | YOLOv8n-CLS |
 | `POST /detect/obb` | 旋转框检测（自动识别传统 / End2End 布局） | YOLOv8n-OBB |
+| `POST /segmentation` | 实例分割（响应 `data.segments[]`：检测字段 + `area_ratio` 掩码占比 + 64×64 `mask_preview` 下采样预览） | YOLOv8m-seg |
+| `POST /ppe` | 工地 PPE 检测（10 类含 NO-Hardhat/NO-Safety Vest 等违章反类；参数语义同 `/detect`：SAHI/confidence/target_classes/roi） | PPE v8 10cls |
+| `POST /fire-smoke` | 火焰/烟雾检测（fire/smoke 两类；参数语义同 `/detect`） | Fire-Smoke v8n |
 | `POST /face/detect` | 人脸检测（bbox + 5 关键点） | YuNet |
 | `POST /face/recognize` | 人脸识别（128 维嵌入 + 余弦相似度比对） | SFace |
 | `POST /reid` | 行人重识别特征（multipart `file` + 可选 `boxes`=[[x1,y1,x2,y2],...] 像素框列表，缺省整图；逐框输出 512 维 L2 归一化 embedding，跨框相似度由消费方做余弦） | OSNet x1.0 |
@@ -60,11 +63,11 @@ cargo build --release --jobs 6
 | `ARGUS_ENGINE_POOL` | 1 | 每引擎实例池大小。>1 时同模型多实例并行推理（多路客户端同模型并发不再串行）。**代价**：内存 = 模型大小 × 池大小 × 已加载引擎数；CPU 预算 = 池大小 × 4（ORT 线程）× 引擎数 ≈ 核数。与多实例部署可叠加（实例数 × 池大小统算） |
 | `ARGUS_<CAP>_POOL` | 回退 `ARGUS_ENGINE_POOL` | 单能力独立设池，覆盖全局值（如 `ARGUS_OCR_POOL=1`）。`<CAP>` 为能力键大写，同 `WARMUP_SIZE`。内存治理杠杆：内存由 ORT 每 session 运行时开销主导（非模型文件大小），`OCR`/`HUMAN_PARSING`/`DEPTH` 设 1 即拿回大头（池 4 全能力 12.4GB，此三项占 ~10.3GB） |
 | `ARGUS_ENABLED_CAPABILITIES` | 未设置 = 全部启用 | 能力白名单（逗号分隔能力键，如 `detection,ocr,face_detection`）。未设置 = 现有行为（凡模型路径已配置即启用），零回归。白名单外能力在 loader 入口即拒绝（返回"能力未启用"，与"模型未配置"可区分），**不触碰文件系统、不创建 session**；`/models` 的 `enabled` 字段与 `/health?deep=true` 的 `configured` 清单同步反映。动机：将来模型目录扫描落地时，这是防止把全部模型拉起来的闸门 |
-| `ARGUS_<CAP>_WARMUP_SIZE` | 沿用引擎 input_size | 预热 dummy 输入尺寸覆盖，`WxH` 格式（如 `ARGUS_OCR_WARMUP_SIZE=320x320`）。`<CAP>` 为能力键大写：`DETECTION`/`CLASSIFICATION`/`OBB`/`FACE_DETECTION`/`FACE_RECOGNITION`/`REID`/`OCR`/`LICENSE_PLATE`/`QR`/`POSE`/`DEPTH`/`HUMAN_PARSING`（注意与模型路径 env 的 `FACE_DET`/`PLATE_DET` 缩写不同）。OCR 必设：960×960 全零 dummy 触发 det 大量伪区域 + rec 批前向，预热 20.4s/实例；320×320 实测 0.43s/实例且首个真实请求推理耗时不变（2026-09-11 实测，池 4：预热 81.5s→1.8s，冷启动首请求 91.3s→11.7s）。CPU 设备上预热对首次真实推理无可见收益（关闭预热实测首推理 6.5s ≈ 热态），保留仅消除潜在首次抖动 |
+| `ARGUS_<CAP>_WARMUP_SIZE` | 沿用引擎 input_size | 预热 dummy 输入尺寸覆盖，`WxH` 格式（如 `ARGUS_OCR_WARMUP_SIZE=320x320`）。`<CAP>` 为能力键大写：`DETECTION`/`PPE`/`FIRE_SMOKE`/`CLASSIFICATION`/`OBB`/`SEGMENTATION`/`FACE_DETECTION`/`FACE_RECOGNITION`/`REID`/`OCR`/`LICENSE_PLATE`/`QR`/`POSE`/`DEPTH`/`HUMAN_PARSING`（注意与模型路径 env 的 `FACE_DET`/`PLATE_DET` 缩写不同）。OCR 必设：960×960 全零 dummy 触发 det 大量伪区域 + rec 批前向，预热 20.4s/实例；320×320 实测 0.43s/实例且首个真实请求推理耗时不变（2026-09-11 实测，池 4：预热 81.5s→1.8s，冷启动首请求 91.3s→11.7s）。CPU 设备上预热对首次真实推理无可见收益（关闭预热实测首推理 6.5s ≈ 热态），保留仅消除潜在首次抖动 |
 | `ARGUS_SHUTDOWN_TIMEOUT_SECS` | 10 | 优雅停机超时：SIGTERM 后等待在途请求的上限，超时强退。需覆盖最长推理（SAHI/depth ~1.5s，池化排队翻倍） |
 | `ARGUS_GPU_MEM_LIMIT_MB` | 0 | CUDA EP 显存上限（MB）。>0 时设置 ORT arena `with_memory_limit`，防 arena 无限膨胀导致 cuBLAS OOM 后永久失败（僵尸态）。0 = 不限（ORT 默认） |
 | `ARGUS_ACQUIRE_TIMEOUT_MS` | 30000 | 推理排队等待超时（ms）。全忙时请求等待引擎池 permit 的上限，超时返回 503。**0 = fail-fast**：不排队，全忙立即 503 |
-| `ARGUS_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `CLASSIFICATION` / `OBB` / `FACE_DET` / `FACE_REC` / `REID` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`）。**命名差异**：模型路径 env 是历史缩写（`FACE_DET`/`FACE_REC`/`PLATE_DET`），新增的按能力 env（`<CAP>_POOL`/`<CAP>_WARMUP_SIZE` 等）一律用规范能力键大写（`FACE_DETECTION`/`FACE_RECOGNITION`/`LICENSE_PLATE`），与 `/models` 的能力名一致，不引入第三套命名 |
+| `ARGUS_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `PPE` / `FIRE_SMOKE` / `CLASSIFICATION` / `OBB` / `SEGMENTATION` / `FACE_DET` / `FACE_REC` / `REID` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`）。**命名差异**：模型路径 env 是历史缩写（`FACE_DET`/`FACE_REC`/`PLATE_DET`），新增的按能力 env（`<CAP>_POOL`/`<CAP>_WARMUP_SIZE` 等）一律用规范能力键大写（`FACE_DETECTION`/`FACE_RECOGNITION`/`LICENSE_PLATE`/`FIRE_SMOKE`），与 `/models` 的能力名一致，不引入第三套命名 |
 
 ## 模型下载
 
@@ -84,9 +87,9 @@ cargo build --release --jobs 6
 | `depth_anything_v2_small.onnx` | [onnx-community/depth-anything-v2-small](https://huggingface.co/onnx-community/depth-anything-v2-small)（`onnx/model.onnx`） |
 | `segformer_b2_clothes.onnx` | [mattmdjaga/segformer_b2_clothes](https://huggingface.co/mattmdjaga/segformer_b2_clothes)(`onnx/model.onnx`,110MB 全量) |
 | `osnet_x1_0.onnx` | Qualcomm AI Hub 官方导出（[qualcomm/OSNet](https://huggingface.co/qualcomm/OSNet) 的 `release_assets.json` S3 直链，v0.62.2）。**zip 内为外置权重格式**（osnet.onnx + osnet.data），需 `onnx.load(load_external_data=True)` + `onnx.save` 内联为单文件；输入 `image [1,3,256,128]` 静态、输出 `embeddings [1,512]` 图内已 L2 |
-| `yolov8m-seg.onnx` | 本地导出：`YOLO('yolov8m-seg.pt').export(format='onnx', imgsz=640, opset=12)`（.pt 取自 `ultralytics/assets` release v8.3.0）。COCO 80 类实例分割，`[1,116,8400]` + proto `[1,32,160,160]`。**端点接入待做**（批 1 任务 3） |
-| `ppe_site_10cls.onnx` | [Hansung-Cho/yolov8-ppe-detection](https://huggingface.co/Hansung-Cho/yolov8-ppe-detection) `best.pt` 本地导出（同上参数）。10 类：Hardhat/Mask/NO-Hardhat/NO-Mask/NO-Safety Vest/Person/Safety Cone/Safety Vest/machinery/vehicle（含**违章反类**）。**能力槽位接入待做**（批 1.5 任务 18） |
-| `fire_smoke_2cls.onnx` | [mfranzon/fire-smoke-yolov8](https://huggingface.co/mfranzon/fire-smoke-yolov8) `fire_smoke_yolov8.pt` 本地导出（同上参数）。fire/smoke 两类。正样本实测置信度中等（0.52，nano 级），生产采用前建议再比选模型。**能力槽位接入待做**（批 1.5 任务 19） |
+| `yolov8m-seg.onnx` | 本地导出：`YOLO('yolov8m-seg.pt').export(format='onnx', imgsz=640, opset=12)`（.pt 取自 `ultralytics/assets` release v8.3.0）。COCO 80 类实例分割，`[1,116,8400]` + proto `[1,32,160,160]`。服务 `/segmentation` |
+| `ppe_site_10cls.onnx` | [Hansung-Cho/yolov8-ppe-detection](https://huggingface.co/Hansung-Cho/yolov8-ppe-detection) `best.pt` 本地导出（同上参数）。10 类：Hardhat/Mask/NO-Hardhat/NO-Mask/NO-Safety Vest/Person/Safety Cone/Safety Vest/machinery/vehicle（含**违章反类**）。服务 `/ppe`。qualcomm gear_guard_net 因三输出自定义头弃用 |
+| `fire_smoke_2cls.onnx` | [mfranzon/fire-smoke-yolov8](https://huggingface.co/mfranzon/fire-smoke-yolov8) `fire_smoke_yolov8.pt` 本地导出（同上参数）。fire/smoke 两类。正样本实测置信度中等（0.52~0.62，nano 级），生产采用前建议再比选模型。服务 `/fire-smoke` |
 
 ## 依赖说明
 

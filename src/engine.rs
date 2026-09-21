@@ -14,6 +14,7 @@ use rust_onnx_infer::engines::obb_detection::ObbDetectionEngine;
 use rust_onnx_infer::engines::ocr::OcrPipeline;
 use rust_onnx_infer::engines::qr_detector::QrDetector;
 use rust_onnx_infer::engines::reid::ReidEngine;
+use rust_onnx_infer::engines::segmentation::SegmentationEngine;
 use rust_onnx_infer::imaging::{FloatMask, Rect};
 use rust_onnx_infer::model::PoseResult;
 use rust_onnx_infer::OnnxInferenceEngine;
@@ -29,6 +30,10 @@ use crate::error::AppError;
 pub const DETECTION_CONFIDENCE_FLOOR: f32 = 0.10;
 /// 检测 NMS IoU 阈值(全局,不做每请求覆盖——NMS 在引擎内完成,重做等于绕过引擎后处理)。
 pub const DETECTION_NMS_IOU: f32 = 0.45;
+/// 分割引擎构造阈值(Ultralytics 默认 conf 0.25)。
+pub const SEGMENTATION_CONFIDENCE: f32 = 0.25;
+/// 分割 NMS IoU 阈值(Ultralytics 默认 0.7;过小会得到比官方更多的重叠检出)。
+pub const SEGMENTATION_NMS_IOU: f32 = 0.7;
 
 // 编译期锁定:下限低于 LOW_MODEL_CONFIDENCE 会让 SAHI 路径行为静默漂移
 const _: () = assert!(
@@ -87,8 +92,11 @@ pub struct EngineManager {
     config: Config,
     device: DeviceType,
     detection: tokio::sync::OnceCell<Arc<EnginePool<DetectionEngine>>>,
+    ppe: tokio::sync::OnceCell<Arc<EnginePool<DetectionEngine>>>,
+    fire_smoke: tokio::sync::OnceCell<Arc<EnginePool<DetectionEngine>>>,
     classification: tokio::sync::OnceCell<Arc<EnginePool<ClassificationEngine>>>,
     obb: tokio::sync::OnceCell<Arc<EnginePool<ObbDetectionEngine>>>,
+    segmentation: tokio::sync::OnceCell<Arc<EnginePool<SegmentationEngine>>>,
     face_det: tokio::sync::OnceCell<Arc<EnginePool<DynFaceDet>>>,
     face_rec: tokio::sync::OnceCell<Arc<EnginePool<FaceRecognitionEngine>>>,
     reid: tokio::sync::OnceCell<Arc<EnginePool<ReidEngine>>>,
@@ -107,8 +115,11 @@ impl EngineManager {
             config,
             device,
             detection: tokio::sync::OnceCell::new(),
+            ppe: tokio::sync::OnceCell::new(),
+            fire_smoke: tokio::sync::OnceCell::new(),
             classification: tokio::sync::OnceCell::new(),
             obb: tokio::sync::OnceCell::new(),
+            segmentation: tokio::sync::OnceCell::new(),
             face_det: tokio::sync::OnceCell::new(),
             face_rec: tokio::sync::OnceCell::new(),
             reid: tokio::sync::OnceCell::new(),
@@ -135,8 +146,11 @@ impl EngineManager {
     pub fn list_loaded(&self) -> Vec<&'static str> {
         let mut loaded = Vec::new();
         if self.detection.initialized() { loaded.push("detection"); }
+        if self.ppe.initialized() { loaded.push("ppe"); }
+        if self.fire_smoke.initialized() { loaded.push("fire_smoke"); }
         if self.classification.initialized() { loaded.push("classification"); }
         if self.obb.initialized() { loaded.push("obb"); }
+        if self.segmentation.initialized() { loaded.push("segmentation"); }
         if self.face_det.initialized() { loaded.push("face_detection"); }
         if self.face_rec.initialized() { loaded.push("face_recognition"); }
         if self.reid.initialized() { loaded.push("reid"); }
@@ -156,8 +170,11 @@ impl EngineManager {
     pub async fn deep_health_check(&self) -> Vec<EngineHealth> {
         let mut results = Vec::new();
         check_engine!(self.detection, "detection", DetectionEngine, results);
+        check_engine!(self.ppe, "ppe", DetectionEngine, results);
+        check_engine!(self.fire_smoke, "fire_smoke", DetectionEngine, results);
         check_engine!(self.classification, "classification", ClassificationEngine, results);
         check_engine!(self.obb, "obb", ObbDetectionEngine, results);
+        check_engine!(self.segmentation, "segmentation", SegmentationEngine, results);
         check_engine!(self.face_det, "face_detection", DynFaceDet, results);
         check_engine!(self.face_rec, "face_recognition", FaceRecognitionEngine, results);
         check_engine!(self.reid, "reid", ReidEngine, results);
@@ -178,27 +195,60 @@ impl EngineManager {
                 self.ensure_enabled("detection")?;
                 let path = self.config.detection_model.clone()
                     .ok_or_else(|| AppError::ModelNotConfigured("detection".into()))?;
-                let model_display = path.display().to_string();
-                let t0 = std::time::Instant::now();
-                let device = self.device;
-                let pool_size = self.config.pool_for("detection");
-                let mut engines = Vec::with_capacity(pool_size);
-                for _ in 0..pool_size {
-                    let p = path.clone();
-                    let engine = tokio::task::spawn_blocking(move || {
-                        DetectionEngine::for_yolo(&p, device, DETECTION_CONFIDENCE_FLOOR, DETECTION_NMS_IOU)
-                    })
-                    .await
-                    .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
-                    engines.push(Arc::new(engine));
-                }
-                tracing::info!("引擎 detection 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
-                let pool = Arc::new(EnginePool::new(engines));
-                warmup_engine("detection", &pool, self.config.warmup_size_for("detection"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
-                Ok(pool)
+                self.load_detection_pool("detection", path).await
             })
             .await
             .cloned()
+    }
+
+    pub async fn ppe(&self) -> Result<Arc<EnginePool<DetectionEngine>>, AppError> {
+        self.ppe
+            .get_or_try_init(|| async {
+                self.ensure_enabled("ppe")?;
+                let path = self.config.ppe_model.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("ppe".into()))?;
+                self.load_detection_pool("ppe", path).await
+            })
+            .await
+            .cloned()
+    }
+
+    pub async fn fire_smoke(&self) -> Result<Arc<EnginePool<DetectionEngine>>, AppError> {
+        self.fire_smoke
+            .get_or_try_init(|| async {
+                self.ensure_enabled("fire_smoke")?;
+                let path = self.config.fire_smoke_model.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("fire_smoke".into()))?;
+                self.load_detection_pool("fire_smoke", path).await
+            })
+            .await
+            .cloned()
+    }
+
+    /// 检测族共用加载(ppe/fire_smoke 复用 DetectionEngine,构造参数与预热语义一致)。
+    async fn load_detection_pool(
+        &self,
+        capability: &'static str,
+        path: std::path::PathBuf,
+    ) -> Result<Arc<EnginePool<DetectionEngine>>, AppError> {
+        let model_display = path.display().to_string();
+        let t0 = std::time::Instant::now();
+        let device = self.device;
+        let pool_size = self.config.pool_for(capability);
+        let mut engines = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let p = path.clone();
+            let engine = tokio::task::spawn_blocking(move || {
+                DetectionEngine::for_yolo(&p, device, DETECTION_CONFIDENCE_FLOOR, DETECTION_NMS_IOU)
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+            engines.push(Arc::new(engine));
+        }
+        tracing::info!("引擎 {capability} 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
+        let pool = Arc::new(EnginePool::new(engines));
+        warmup_engine(capability, &pool, self.config.warmup_size_for(capability), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+        Ok(pool)
     }
 
     pub async fn classification(&self) -> Result<Arc<EnginePool<ClassificationEngine>>, AppError> {
@@ -251,6 +301,35 @@ impl EngineManager {
                 tracing::info!("引擎 obb 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
                 let pool = Arc::new(EnginePool::new(engines));
                 warmup_engine("obb", &pool, self.config.warmup_size_for("obb"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
+                Ok(pool)
+            })
+            .await
+            .cloned()
+    }
+
+    pub async fn segmentation(&self) -> Result<Arc<EnginePool<SegmentationEngine>>, AppError> {
+        self.segmentation
+            .get_or_try_init(|| async {
+                self.ensure_enabled("segmentation")?;
+                let path = self.config.segmentation_model.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("segmentation".into()))?;
+                let model_display = path.display().to_string();
+                let t0 = std::time::Instant::now();
+                let device = self.device;
+                let pool_size = self.config.pool_for("segmentation");
+                let mut engines = Vec::with_capacity(pool_size);
+                for _ in 0..pool_size {
+                    let p = path.clone();
+                    let engine = tokio::task::spawn_blocking(move || {
+                        SegmentationEngine::for_yolo(&p, device, SEGMENTATION_CONFIDENCE, SEGMENTATION_NMS_IOU)
+                    })
+                    .await
+                    .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                    engines.push(Arc::new(engine));
+                }
+                tracing::info!("引擎 segmentation 池({pool_size}) 加载完成: {model_display} ({:?})", t0.elapsed());
+                let pool = Arc::new(EnginePool::new(engines));
+                warmup_engine("segmentation", &pool, self.config.warmup_size_for("segmentation"), |e, w, h| e.predict(&dummy_image(w, h)).map(|_| ())).await;
                 Ok(pool)
             })
             .await
@@ -686,6 +765,9 @@ impl OnnxInferPredict for FaceRecognitionEngine {
 impl OnnxInferPredict for ReidEngine {
     // OSNet x1.0 静态输入 128x256(W,H),与模型文件绑定,不取自 session
     fn input_size(&self) -> (i32, i32) { (128, 256) }
+}
+impl OnnxInferPredict for SegmentationEngine {
+    fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }
 }
 impl OnnxInferPredict for LicensePlateEngine {
     fn input_size(&self) -> (i32, i32) { rust_onnx_infer::OnnxInferenceEngine::input_size(self) }

@@ -141,10 +141,14 @@
 // ---- 任务定义(与后端端点一一对应) ----
 const TASKS = [
   { id: "detect",       name: "目标检测",  ico: "📦", path: "/detect",           kind: "boxes" },
+  { id: "ppe",          name: "PPE检测",  ico: "⛑", path: "/ppe",              kind: "boxes" },
+  { id: "fire_smoke",   name: "火烟检测",  ico: "🔥", path: "/fire-smoke",       kind: "boxes" },
+  { id: "segmentation", name: "实例分割",  ico: "✂️", path: "/segmentation",     kind: "seg" },
   { id: "classify",     name: "图像分类",  ico: "🏷", path: "/classify",         kind: "classify" },
   { id: "obb",          name: "旋转框检测", ico: "🛩", path: "/detect/obb",      kind: "obb" },
   { id: "face_det",     name: "人脸检测",  ico: "🙂", path: "/face/detect",      kind: "face" },
   { id: "face_rec",     name: "人脸识别",  ico: "🧑‍💼", path: "/face/recognize",  kind: "faceRec" },
+  { id: "reid",         name: "行人重识别", ico: "🚶", path: "/reid",            kind: "reid" },
   { id: "ocr",          name: "文字识别",  ico: "🔤", path: "/ocr",              kind: "ocr" },
   { id: "plate",        name: "车牌识别",  ico: "🚗", path: "/license-plate",    kind: "plates" },
   { id: "qr",           name: "二维码检测", ico: "🔳", path: "/qr",              kind: "qr" },
@@ -306,6 +310,10 @@ function renderResult(snap, redrawOnly) {
 
   switch (task.kind) {
     case "boxes": drawBoxes(data.detections || [], false); body.append(statsBlock(stats), listBlock(data.detections || [], d => d.class ?? d.text ?? "?", d => d.confidence ?? d.score)); break;
+    // 后端契约:segments[]{class,confidence,bbox,area_ratio,mask_preview,mask_cols}
+    case "seg":   drawBoxes((data.segments || []).map(s => ({ bbox: s.bbox, class: `${s.class}·掩码${((s.area_ratio ?? 0) * 100).toFixed(0)}%`, confidence: s.confidence }))); body.append(statsBlock(stats), listBlock(data.segments || [], d => `${d.class}·掩码占比 ${((d.area_ratio ?? 0) * 100).toFixed(1)}%`, d => d.confidence)); break;
+    // 后端契约:regions[]{bbox,embedding[512]}(L2 归一化)
+    case "reid":  drawReid(data.regions || []); body.append(statsBlock(stats), reidBlock(data)); break;
     // 后端契约:data.plates[{bbox,text,score,plate_type}](字段名与 detect 不同,曾误读 detections 致永远"未检出")
     case "plates": drawBoxes(data.plates || []); body.append(statsBlock(stats), listBlock(data.plates || [], d => `${d.text}(${d.plate_type ?? "?"})`, d => d.score)); break;
     case "classify": body.append(statsBlock(stats), listBlock(data.predictions || [], d => d.class, d => d.confidence)); break;
@@ -412,6 +420,23 @@ function drawBoxes(dets) {
     ctx.strokeRect(px(x1), px(y1), px(x2 - x1), px(y2 - y1));
     label(`${d.class ?? d.text ?? ""} ${(100 * (d.confidence ?? d.score ?? 0)).toFixed(0)}%`, px(x1), px(y1), PALETTE[i % PALETTE.length]);
   });
+}
+
+function drawReid(regions) {
+  regions.forEach((r, i) => {
+    let [x1, y1, x2, y2] = r.bbox;
+    let w = srcImage.naturalWidth, h = srcImage.naturalHeight;
+    if (isNormalized(r.bbox)) { x1 *= w; x2 *= w; y1 *= h; y2 *= h; }
+    boxStroke(i);
+    ctx.strokeRect(px(x1), px(y1), px(x2 - x1), px(y2 - y1));
+    label(`行人#${i}(${r.embedding?.length ?? 0}d)`, px(x1), px(y1), PALETTE[i % PALETTE.length]);
+  });
+}
+
+function reidBlock(data) {
+  const d = document.createElement("div"); d.className = "legend";
+  d.innerHTML = `输出 ${data.count ?? 0} 个区域 × ${data.dim ?? "?"} 维 L2 归一化 embedding;跨图/跨框相似度由消费方对 embedding 做余弦(阈值需按场景标定)`;
+  return d;
 }
 
 function drawObb(dets) {

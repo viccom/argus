@@ -5,8 +5,9 @@ use std::path::PathBuf;
 /// 能力键全集（规范名，与 `/models`、`EngineManager::list_loaded`、`configured_engines`
 /// 一致）。按能力覆盖的 env（预热尺寸、池大小等）一律以能力键大写为后缀，
 /// 不引入第三套命名；与模型路径 env（`FACE_DET` 等）的差异在 README 记录。
-pub const CAPABILITY_KEYS: [&str; 12] = [
-    "detection", "classification", "obb", "face_detection", "face_recognition", "reid",
+pub const CAPABILITY_KEYS: [&str; 15] = [
+    "detection", "classification", "obb", "ppe", "fire_smoke",
+    "face_detection", "face_recognition", "reid", "segmentation",
     "ocr", "license_plate", "qr", "pose", "depth", "human_parsing",
 ];
 
@@ -38,10 +39,16 @@ pub struct Config {
     pub acquire_timeout_ms: u64,
     /// 检测模型路径（YOLO/RT-DETR/RF-DETR）。None 则 /detect 返回未配置错误。
     pub detection_model: Option<PathBuf>,
+    /// PPE 检测模型路径(安全帽/反光衣等,复用 DetectionEngine)。
+    pub ppe_model: Option<PathBuf>,
+    /// 火焰/烟雾检测模型路径(复用 DetectionEngine)。
+    pub fire_smoke_model: Option<PathBuf>,
     /// 图像分类模型路径（YOLO-cls 系列）。
     pub classification_model: Option<PathBuf>,
     /// OBB 模型路径。
     pub obb_model: Option<PathBuf>,
+    /// 实例分割模型路径(YOLO-seg 系列)。
+    pub segmentation_model: Option<PathBuf>,
     /// 人脸检测模型路径（YuNet）。
     pub face_det_model: Option<PathBuf>,
     /// 人脸识别模型路径（SFace/ArcFace）。
@@ -95,8 +102,11 @@ impl Default for Config {
             gpu_mem_limit_mb: 0,
             acquire_timeout_ms: 30000,
             detection_model: None,
+            ppe_model: None,
+            fire_smoke_model: None,
             classification_model: None,
             obb_model: None,
+            segmentation_model: None,
             face_det_model: None,
             face_rec_model: None,
             reid_model: None,
@@ -168,8 +178,11 @@ impl Config {
         }
 
         cfg.detection_model = env_path("ARGUS_DETECTION_MODEL");
+        cfg.ppe_model = env_path("ARGUS_PPE_MODEL");
+        cfg.fire_smoke_model = env_path("ARGUS_FIRE_SMOKE_MODEL");
         cfg.classification_model = env_path("ARGUS_CLASSIFICATION_MODEL");
         cfg.obb_model = env_path("ARGUS_OBB_MODEL");
+        cfg.segmentation_model = env_path("ARGUS_SEGMENTATION_MODEL");
         cfg.face_det_model = env_path("ARGUS_FACE_DET_MODEL");
         cfg.face_rec_model = env_path("ARGUS_FACE_REC_MODEL");
         cfg.reid_model = env_path("ARGUS_REID_MODEL");
@@ -240,8 +253,11 @@ impl Config {
     pub fn configured_engines(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
         if self.detection_model.is_some() { v.push("detection"); }
+        if self.ppe_model.is_some() { v.push("ppe"); }
+        if self.fire_smoke_model.is_some() { v.push("fire_smoke"); }
         if self.classification_model.is_some() { v.push("classification"); }
         if self.obb_model.is_some() { v.push("obb"); }
+        if self.segmentation_model.is_some() { v.push("segmentation"); }
         if self.face_det_model.is_some() { v.push("face_detection"); }
         if self.face_rec_model.is_some() { v.push("face_recognition"); }
         if self.reid_model.is_some() { v.push("reid"); }
@@ -379,6 +395,38 @@ mod tests {
             env::remove_var("ARGUS_DEVICE");
             env::remove_var("ARGUS_AUTH_TOKEN");
             env::remove_var("ARGUS_DETECTION_MODEL");
+        }
+    }
+
+    #[test]
+    fn from_env_should_parse_scene_and_seg_models() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_PPE_MODEL", "/models/ppe_site_10cls.onnx");
+            env::set_var("ARGUS_FIRE_SMOKE_MODEL", "/models/fire_smoke_2cls.onnx");
+            env::set_var("ARGUS_SEGMENTATION_MODEL", "/models/yolov8m-seg.onnx");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.ppe_model.as_deref(),
+            Some(std::path::Path::new("/models/ppe_site_10cls.onnx"))
+        );
+        assert_eq!(
+            config.fire_smoke_model.as_deref(),
+            Some(std::path::Path::new("/models/fire_smoke_2cls.onnx"))
+        );
+        assert_eq!(
+            config.segmentation_model.as_deref(),
+            Some(std::path::Path::new("/models/yolov8m-seg.onnx"))
+        );
+        let configured = config.configured_engines();
+        for cap in ["ppe", "fire_smoke", "segmentation"] {
+            assert!(configured.contains(&cap), "应包含 {cap}");
+        }
+        unsafe {
+            env::remove_var("ARGUS_PPE_MODEL");
+            env::remove_var("ARGUS_FIRE_SMOKE_MODEL");
+            env::remove_var("ARGUS_SEGMENTATION_MODEL");
         }
     }
 

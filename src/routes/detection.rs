@@ -156,18 +156,41 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
 
 // ---- handlers ----
 
-/// POST /detect — 目标检测（可选 SAHI 切片 + 请求级 confidence/target_classes/roi 过滤）。
-pub async fn detect(
-    State(state): State<AppState>,
+/// 检测族能力:ppe/fire_smoke 复用 DetectionEngine 与本文件的全部参数语义
+/// (SAHI/confidence/target_classes/roi),仅模型与能力键不同。
+pub(crate) enum DetectCap {
+    Detection,
+    Ppe,
+    FireSmoke,
+}
+
+impl DetectCap {
+    async fn pool(
+        &self,
+        state: &AppState,
+    ) -> Result<std::sync::Arc<crate::engine::EnginePool<rust_onnx_infer::engines::detection::DetectionEngine>>, AppError>
+    {
+        match self {
+            Self::Detection => state.engines.detection().await,
+            Self::Ppe => state.engines.ppe().await,
+            Self::FireSmoke => state.engines.fire_smoke().await,
+        }
+    }
+}
+
+/// 检测族共享实现:参数校验先于图像解码与引擎加载,非法参数不消耗推理资源。
+pub(crate) async fn run_detect(
+    state: AppState,
     multipart: Multipart,
+    cap: DetectCap,
+    endpoint: &'static str,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_detect_multipart(multipart).await?;
-    // 参数校验先于图像解码与引擎加载,非法参数不消耗推理资源
     let filter = DetectFilter::new(params.confidence, params.target_classes, params.roi)?;
     let image = decode_image(params.file).await?;
     let (img_w, img_h) = (image.width(), image.height());
 
-    let pool = state.engines.detection().await?;
+    let pool = cap.pool(&state).await?;
 
     let _permit = acquire_permit(&state).await?;
 
@@ -200,7 +223,7 @@ pub async fn detect(
     let dtos: Vec<DetectionDto> = detections.iter().map(DetectionDto::from).collect();
     let count = dtos.len();
     tracing::info!(
-        endpoint = "detect",
+        endpoint,
         count,
         sahi = params.sahi,
         confidence = filter.confidence,
@@ -218,6 +241,14 @@ pub async fn detect(
     }
 
     Ok(Json(json!({ "status": "ok", "data": data })))
+}
+
+/// POST /detect — 目标检测（可选 SAHI 切片 + 请求级 confidence/target_classes/roi 过滤）。
+pub async fn detect(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<Json<Value>, AppError> {
+    run_detect(state, multipart, DetectCap::Detection, "detect").await
 }
 
 /// POST /detect/obb — OBB 旋转框检测。
