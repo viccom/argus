@@ -100,12 +100,12 @@
 
 ## 四、实施方案(阶段 0-6)
 
-### 阶段 0:fork rust-onnx-infer → viccom(前置,消除单点)
+### 阶段 0:fork rust-onnx-infer → viccom(前置,消除单点) — ✅ 完成(2026-09-21 前后)
 - GitHub 建 `viccom/rust-onnx-infer`(含本地 2 补丁:api-26 + resize 卷积修复),origin 换 fork;
 - argus Cargo.toml 由 path 依赖换 git 依赖(或 path 指向固定 commit),README 依赖说明改写;
 - **验证**:两仓库 CI 三绿;argus 编译产物行为不变(bus.jpg 检出基线)。
 
-### 阶段 1:GPU 硬化(缺口 A+B+C,~1 天)
+### 阶段 1:GPU 硬化(缺口 A+B+C,~1 天) — ⬜ 待开始
 - `OnnxRuntimeConfig` 加 `gpu_mem_limit_mb`(默认 0);`add_cuda_ep` 接 `with_memory_limit`;argus env 透传 `ARGUS_GPU_MEM_LIMIT_MB`;
 - 预热:EngineManager 引擎加载后对池内每实例跑 dummy 推理(DetectionEngine 用 640 零张量;各引擎用自身 input_size),失败 warn 不阻断;日志含每实例耗时;
 - 深检:`/health?deep=true` 对已加载引擎发 dummy 推理,输出 `engine_health` 数组(ok/degraded);浅检不动;
@@ -113,7 +113,7 @@
 - TDD:config 解析/timeout=0 行为/dummy 预热失败不阻断;CPU 路径零回归(85 测试)。
 - **关键细节必须带上**:arena 只增不减注释、2.9GB/Session 实测数、fail-fast 与 pool_size 对齐建议、1.26.0 ORT 匹配说明。
 
-### 阶段 2:EngineManager 动态化(缺口 D,~1-2 天,与 P2 重构合并)
+### 阶段 2:EngineManager 动态化(缺口 D,~1-2 天,与 P2 重构合并) — ⬜ 待开始
 - 结构:`OnceCell<固定字段>` → `DashMap<String, Arc<EnginePool<DynEngine>>>`;name→引擎类型由**目录+能力注册表**解析(见下);
 - 模型目录约定:`models/` 下按能力子目录(`detect/`、`classify/`、`pose/`…),文件名即模型名;`POST /models/{name}/unload` 幂等卸载(进行中推理持 Arc 自然释放);
 - **路径校验照抄 yolo-rs**(拒绝 `..`/`/`/`\`/`\0`/空);
@@ -124,23 +124,33 @@
 - 风险:动核心结构,先补 EngineManager 现有行为的特征测试再重构;warden 托管下灰度。
 - **这是唯一"重构"级阶段,放在批 1 收尾后。**
 
-### 阶段 3:HTTP 参数层(缺口 E+F+G,~1 天)
+### 阶段 3:HTTP 参数层(缺口 E+F+G,~1 天) — ✅ 完成
+
+> 状态更新(2026-09-27):`/detect` 的 confidence/target_classes/roi 与
+> `/detect/batch`(JSON image_paths + 逐图错误隔离 + 独立 permit)均已上线并
+> 有路由测试;save_result 维持暂缓(契约适配期结论不变)。
 - `/detect` 增参:`confidence`(后过滤)、`target_classes`、`roi`(归一化多边形,射线法判定中心点);`/classify` 等按需;
 - `/detect/batch`:JSON `{image_paths[], model?, confidence?}`,逐图循环+独立 permit+错误隔离(单图失败该条目带 error,不炸整批);**注意**:image_paths 是服务端本地路径,内网文件语义,文档明示;
 - save_result 暂缓(契约适配期)。
 
-### 阶段 4:A100 对标(实测说话,~1 天)
+### 阶段 4:A100 对标(实测说话,~1 天) — ⬜ 待开始
 - **CPU 前置基线(2026-09-10 实测,16 核共享 KVM)**:argus 与 yolo-rs 同机对压(同 ORT 1.26.0 dylib、同模型文件、同图、同压测脚本)。pool=1/intra=4:单请求 p50 67ms vs 79ms(argus 快 16%),吞吐上限 17-18 vs 20-22 QPS(yolo-rs 预处理在 session 锁外,串行段短;pool>1 时差距消失)。pool=4/intra=4:**天花板打平 ~34-35 QPS**,argus p95 全档优 10~30%(c=16: 534 vs 796ms),c=128 双方零错误。结论:纯 CPU 下 argus 已达 yolo-rs 同水平;500 QPS 基线仍待本阶段 A100 实测。压测脚本 `scripts/bench_http.py`;yolo-rs 对照服务已注册 warden(:7041,auto_start=false)。
 - yhpc 部署:CUDA 12.8.1(cuDNN 9.8)容器基底(勿回退 9.1,差 2 倍);ORT 1.26.0;
 - `gpu_mem_limit_mb = 模型数 × 单模型峰值`(yolov8n ~3GB/Session 起步);`acquire_timeout_ms=0` + `max_concurrent=pool_size` + `engine_pool` 与 `ORT 线程`预算对齐(pool×intra≈核);
 - 压测基线:对齐 yolo-rs 的 500 QPS(bench 脚本可复用其 `scripts/bench_http.py` 思路);
 - 深检/预热在 GPU 上的实测验证(冷启动首请求延迟对比)。
 
-### 阶段 5:safe-bot 适配(消费方改造)
+### 阶段 5:safe-bot 适配(消费方改造) — ✅ 完成(路径变更:由 safebot-go 取代)
+
+> 状态更新(2026-09-27):本阶段原计划改 Python 版 detector.py;实际由
+> safebot-go(Go 重写)完成——原生 argusEngine 适配(归一化/鉴权/熔断降级,
+> M0-M5)+ 2026-09-26 类别字典化(class_catalog 驱动端点路径与类别翻译,
+> /ppe、/fire-smoke 已在 safebot 登记消费)。Python 版随 yolo-rs 一起进入
+> 归档射程,不再单独适配。
 - detector.py/analysis/service.py 改指 argus:双语类名(COCO 映射表搬过去)、summary 消费方自算;
 - 若改造受阻 → 备选:独立 api-gateway(仅翻译契约,无推理);**默认走改造**。
 
-### 阶段 6:yolo-rs 归档
+### 阶段 6:yolo-rs 归档 — ⬜ 待开始
 - README 顶部标注 `superseded by argus`,仓库转 archive;
 - 前置条件:阶段 4 压测达标 + safe-bot 在 argus 上运行 ≥1 个观察周期。
 

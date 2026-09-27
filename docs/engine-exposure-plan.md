@@ -23,7 +23,7 @@
 | 1 | classification 纵切片模板(后续引擎按此复制) | G1 同构 | yolov8n-cls.onnx(Ultralytics v8.3.0 .pt → onnx opset12/224 官方导出) | ✅ | 前置门:magic 0x08/shape [1,3,224,224]×[1,1000]/ORT 直跑 softmax sum=1.0/bus.jpg top1=minibus 0.576;TDD:config+engine+routes 3 轮先红后绿;E2E:curl /classify top1=minibus 0.581(与 python 参照 0.583 一致),top_k=2/错误路径全过;附带修复上游 resize 混叠 bug(见 2026-09-10 变更记录);测试 73→80 全绿 | 2026-09-10 |
 | 2 | reid 行人重识别(OSNet 512 维) | G1,embedding 契约同 face_rec | Qualcomm AI Hub `qualcomm/OSNet` v0.62.2(外置权重需内联,见 README 模型表) | ✅ | 前置门:magic 0x08/签名与引擎文档逐项一致(`image [1,3,256,128]`→`embeddings [1,512]`)/ORT 直跑随机输入 L2=1.0000;TDD:路由 9 测试(缺 file/坏图/未配置/boxes 坏 JSON/坐标数错/退化框/clamp 行为/DTO)先红后绿,`cargo test --jobs 6` 154+1 全绿,clippy 零警告;E2E(ad-hoc :7099 debug 实例):ppe_test.png 双人框 count=2/dim=512/两 embedding L2=1.0000/278ms,同一人框模式 vs 整图模式 cos=1.0000(契约一致),跨人 cos=0.691(两人同装束,合理);错误路径 200 信封 `data.error` 提示 boxes 解析细节 | 2026-09-21 |
 | 3 | segmentation 实例分割 | G2 mask,DTO 复用 depth 下采样先例 | `yolov8m-seg.onnx`(已入 models/) | ✅ | 前置门:标准布局 `[1,116,8400]`+proto `[1,32,160,160]`/bus.jpg 直跑 person/bus 值域正常(上批完成);TDD:路由 5 测试(缺 file/坏图/未配置/带掩码 DTO 序列化含 area_ratio=4/16 断言/无掩码 DTO),det 抽 `run_detect` 共享后 165+1 全绿、clippy 零警告;E2E(ad-hoc):bus.jpg 6 实例(bus 0.93/面积 31%,4 person,tie),掩码预览 63 列×64 行,`data.segments[]` 契约 | 2026-09-21 |
-| 4 | face_attribute 年龄/性别/表情 | G3 组合式,复用 face_recognize 两段式模板 | 待获取 | ⬜ | | |
+| 4 | face_attribute 年龄/性别/表情 | G3 组合式,复用 face_recognize 两段式模板 | 待获取 | ⏸ | 2026-09-27 挂起:年龄识别涉 PIPL 人脸敏感个人信息合规红线(safebot 侧判定,见 safebot-go docs/assistant/04 §3.9),表情/性别对安监价值低;待需求重估再启 | |
 
 ### 批 1.5:场景批(2026-09-21 插入,按企业价值排序)
 
@@ -121,7 +121,7 @@
 
 | 序 | 内容 | 涉及任务 | 理由 |
 |---|---|---|---|
-| 1 | pose_rules + face_attribute + hand_keypoint | 22 / 4 / 5 | 表 1 白捡项,零模型获取风险;摔倒事件直击 safe_bot 高处作业违章 |
+| 1 | pose_rules + hand_keypoint | 22 / 5 | 表 1 白捡项,零模型获取风险;摔倒事件直击 safe_bot 高处作业违章(face_attribute 已挂起,任务 4) |
 | 2 | YOLOE 烘焙导出 | 23 | 一个模型解锁"任意自定义类别检测",后续每个定制项目省一次训练 |
 | 3 | crack + ppe 升级 | 24 / 25 | 直接对齐 safe_bot 违章目录的确定性场景 |
 | 4 | CLIP/SigLIP2 `/embed` | 30 | 通用性最强的新能力(检索/去重/零样本三合一) |
@@ -131,6 +131,7 @@
 
 ## 变更记录
 
+- 2026-09-27:**状态过时部分校正**。任务 4 face_attribute 挂起(年龄=PIPL 合规红线,表情/性别价值低,落地优先级表同步移除);吸收计划侧阶段 0/3/5 标完成(fork 早已换 git 依赖、HTTP 参数层与 /detect/batch 已上线、safe-bot 适配由 safebot-go 原生完成并类别字典化)。另注:批 1.5 任务 18/19(ppe/fire-smoke)已于 2026-09-26 随新版二进制生产部署并激活(此前生产跑旧版无这些端点,系 argus.env 漏配四引擎变量,已用 warden 内联环境补齐);任务 19 的"比选更强模型"建议仍有效。
 - 2026-09-21:**模型生态调研结论编排入表**(调研全文见 `model-ecosystem-research.md`,检索时点 2026-09-21):新增批 1.6(场景即插槽,任务 23-29:YOLOE 开放词汇/crack/ppe 升级/barcode/消防器材/行为违章/YOLO26 换代)与批 6(小契约能力,任务 30-34:/embed/密度图/图像返回契约/仪表读数/图对匹配);修正任务 20 状态(`/quality` 已上线纯算法,此前误列待接入);任务 21 标注对任务 32 的依赖;新增"落地优先级"节(Top5:白捡项→YOLOE→crack+ppe→/embed→图像增强)。架构发现:上游原生支持 YOLOE/YOLO26 标准布局,开放词汇与模型换代均零契约改动。
 - 2026-09-21:插入批 1.5 场景批(PPE/火烟/IQA/增强/姿态规则),按企业价值排序。**方向修订**:GPU(吸收计划阶段 4)暂缓,主攻 CPU 线——批 1 解卡(网络已恢复)→ 场景批 → 跨帧跟踪 + 事件规则层(新工作流,另立方案)→ /metrics;阶段 2 动态化仍是唯一重构级合并点。同日完成上游 javpower 1c6ed67(OCR 旋转四边形)同步进 fork(01f66db)与 argus 依赖更新(ba3f83e),E2E 验证旋转文字识别恢复。
 - 2026-09-21:**批 1 任务 3 与批 1.5 任务 18/19 全部接入完成**:`/segmentation`(G2,DTO 含 area_ratio + 64×64 掩码预览,复用抽出的 `downsample_grid` 共享函数)、`/ppe`、`/fire-smoke`(G1,`DetectCap` 枚举 + `run_detect` 共享实现,保留"参数校验先于引擎加载"语义,检测族构造抽 `load_detection_pool` 辅助);CAPABILITY_KEYS 12→15;/ui 增 4 卡(reid/实例分割/PPE/火烟,reid/seg 有专属渲染分支)。测试 154→165+1 全绿,clippy 零警告。E2E 全过(ad-hoc 实例):seg bus.jpg 6 实例带掩码、ppe 8 检出与 python 参照一致、fire-smoke 正/负样本正确。批 1 剩 face_attribute(任务 4,模型来源已查实待下载);批 1.5 剩 20/21/22(IQA/增强/姿态规则)。
