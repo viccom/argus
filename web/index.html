@@ -154,6 +154,7 @@ const TASKS = [
   { id: "qr",           name: "二维码检测", ico: "🔳", path: "/qr",              kind: "qr" },
   { id: "quality",      name: "质量评估",  ico: "🎚", path: "/quality",          kind: "quality" },
   { id: "pose",         name: "姿态估计",  ico: "🧍", path: "/pose",             kind: "pose" },
+  { id: "pose_rules",   name: "摔倒检测",  ico: "🚨", path: "/pose-rules",        kind: "poseRules" },
   { id: "depth",        name: "深度估计",  ico: "🏔", path: "/depth",            kind: "depth" },
   { id: "parsing",      name: "人体解析",  ico: "👕", path: "/human-parsing",    kind: "parsing" },
 ];
@@ -324,6 +325,14 @@ function renderResult(snap, redrawOnly) {
     case "qr":    drawQr(data.detections || []); body.append(statsBlock(stats), listBlock(data.detections || [], () => "二维码", d => d.score)); break;
     case "quality": body.append(statsBlock(stats), qualityBlock(data.quality)); break;
     case "pose":  drawPoses(data.poses || []); body.append(statsBlock(stats), listBlock(data.poses || [], () => "人体", p => p.confidence)); break;
+    case "poseRules": {
+      drawPoseRules(data.poses || []);
+      const evs = (data.poses || []).flatMap(p => p.events || []);
+      stats.push(`<div class="stat"><div class="v">${(evs.filter(e => e.rule === "fall")).length}</div><div class="k">摔倒</div></div>`);
+      stats.push(`<div class="stat"><div class="v">${(evs.filter(e => e.rule === "raise_hand")).length}</div><div class="k">举手</div></div>`);
+      body.append(statsBlock(stats), poseRuleBlock(data.poses || []));
+      break;
+    }
     case "depth": drawDepth(data.depth); body.append(statsBlock(stats), depthStats(data.depth)); break;
     case "parsing": body.append(statsBlock(stats), parsingBlock(data.parsing)); break;
   }
@@ -496,6 +505,49 @@ function drawQr(dets) {
     ctx.strokeRect(px(d.x), px(d.y), px(d.w), px(d.h));
     label(`QR ${(100 * d.score).toFixed(0)}%`, px(d.x), px(d.y), PALETTE[i % PALETTE.length]);
   });
+}
+
+// 姿态规则:画骨架,fall 红框红字 / raise_hand 橙字 / skip 灰字
+function drawPoseRules(poses) {
+  poses.forEach(p => {
+    const fall = (p.events || []).some(e => e.rule === "fall");
+    const hand = (p.events || []).some(e => e.rule === "raise_hand");
+    const [x1, y1, x2, y2] = p.bbox;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = fall ? "#f85149" : "rgba(77,163,255,.7)";
+    ctx.setLineDash(fall ? [8, 4] : []);
+    ctx.strokeRect(px(x1), px(y1), px(x2 - x1), px(y2 - y1));
+    ctx.setLineDash([]);
+    if (fall) label(`摔倒 ${(100 * Math.max(...p.events.filter(e => e.rule === "fall").map(e => e.confidence))).toFixed(0)}%`, px(x1), px(y1), "#f85149");
+    if (hand) label("举手", px(x1), px(y1) + (fall ? 18 : 0), "#f0883e");
+    // 骨架(浅色,复用 pose 画法的数据形状)
+    ctx.strokeStyle = "#4da3ff"; ctx.lineWidth = 2;
+    SKELETON.forEach(([a, b]) => {
+      const ka = p.keypoints?.[a], kb = p.keypoints?.[b];
+      if (ka && kb && ka.score > 0.3 && kb.score > 0.3) {
+        ctx.beginPath(); ctx.moveTo(px(ka.x), px(ka.y)); ctx.lineTo(px(kb.x), px(kb.y)); ctx.stroke();
+      }
+    });
+    (p.keypoints || []).forEach(k => {
+      if (k.score <= 0.3) return;
+      ctx.fillStyle = "#3fb950";
+      ctx.beginPath(); ctx.arc(px(k.x), px(k.y), 3, 0, Math.PI * 2); ctx.fill();
+    });
+  });
+}
+
+function poseRuleBlock(poses) {
+  const d = document.createElement("div"); d.className = "det-list";
+  const rows = poses.flatMap(p => (p.events || []).map(e => ({ p, e })));
+  if (!rows.length) { d.innerHTML = `<div class="legend">无规则事件(正常)</div>`; return d; }
+  rows.forEach(({ p, e }) => {
+    const row = document.createElement("div"); row.className = "det-item";
+    const color = e.rule === "fall" ? "#f85149" : e.rule === "raise_hand" ? "#f0883e" : "#8a99ab";
+    const name = e.rule === "fall" ? "摔倒" : e.rule === "raise_hand" ? "举手" : "无法判定";
+    row.innerHTML = `<span class="dot" style="background:${color}"></span><span class="cls">人体#${e.person} ${name}</span><span class="conf" style="color:${color}">${esc(e.evidence || "")}</span>`;
+    d.append(row);
+  });
+  return d;
 }
 
 function drawPoses(poses) {

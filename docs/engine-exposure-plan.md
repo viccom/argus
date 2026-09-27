@@ -36,7 +36,7 @@
 | 19 | fire_smoke_detect 火焰/烟雾检测(同上) | G1 | mfranzon/fire-smoke-yolov8(nano 级),`fire_smoke_2cls.onnx` 已入 models/ | ✅(生产采用前建议比选更强模型) | 接入:`/fire-smoke` 同上;E2E 正样本(房屋火灾)fire 0.618/负样本(bus.jpg)0 检出,1.6s(debug);5 个路由测试 | 2026-09-21 |
 | 20 | image_quality 无参考画质评估(IQA) | G1 | 无需模型(纯算法) | ✅ | 状态核实(2026-09-21):`/quality` + `QualityAssessor` 纯算法评估器已上线(`routes/analysis.rs`,无 ONNX 模型),此前误列"待接入",修正 | 2026-09-21 |
 | 21 | image_enhance 低光增强/去雾(检测前置) | G2 同尺寸 | 上游引擎已有;**前置依赖批 6 任务 32(图像返回契约)** | ⬜ | | |
-| 22 | pose_rules 姿态几何规则(零模型,摔倒/举手) | G1 纯算法 | 无需模型(输入 pose 关键点);落地顺序第 1 位(研究 §六) | ⬜ | | |
+| 22 | pose_rules 姿态几何规则(零模型,摔倒/举手) | G1 纯算法 | 无需模型(输入 pose 关键点);落地顺序第 1 位(研究 §六) | ✅ | TDD:规则数学 7 用例(站立无事件/躺倒三票全中/弯腰单票不触发/低分 skip/举手/低分腕不误报/跌倒+举手并存)先红后绿 + handler 2 用例(缺 file/引擎未配置),174+1 全绿 clippy 零警告;E2E(ad-hoc :7099):摔倒正样本(平躺+倒梯子实拍)fall conf=1.00 三票全中(torso 62°/ar 1.73/span 0.19),站姿负样本 9 人零误报(6 人合影仅 1 边缘人 skip_low_quality),跪姿施救者正确不报;已知边界:俯卧姿态 yolov8n-pose 本身不检出(模型能力边界,非规则层问题);/ui 增摔倒检测卡(骨架+红框事件标注);DTO 含 keypoints 供几何复核 | 2026-09-27 |
 
 ### 批 1.6:场景即插槽(2026-09-21 研究新增,调研依据见 `model-ecosystem-research.md` 表 2)
 
@@ -46,7 +46,7 @@
 |---|---|---|---|---|---|---|
 | 23 | YOLOE 开放词汇检测(prompt-free 类别烘焙导出) | G1,复用 segmentation 引擎(上游原生支持标准布局) | YOLOE-26 ultralytics 官方导出 | ⬜ | | |
 | 24 | crack/pothole 基建缺陷检测(新能力槽) | G1 | cazzz307/yolov8-crack-detection(nano)等,落地时比选 | ⬜ | | |
-| 25 | ppe 模型升级比选(14 类含 NO-Goggles/Ladder / yolov11 版) | G1 换模型 | jashwanthpeddisetty0712(14 类)/ melihuzunoglu(v11) | ⬜ | | |
+| 25 | ppe 模型升级比选(14 类含 NO-Goggles/Ladder / yolov11 版) | G1 换模型 | jashwanthpeddisetty0712(14 类)/ melihuzunoglu(v11) | ✅(比选结论:**不换**) | 候选 2 melihuzunoglu v11 类别面仅 4-5 类(无 NO-Vest 直接类、无机械车辆)纸面淘汰;候选 1 jashwanthpeddisetty0712 v8m 14 类(含 Fall-Detected/Ladder/NO-Gloves/NO-Goggles)前置门过(标准布局 [1,18,8400]/值域正常)但实拍对比全面落败:工地图 Person 召回为零(仅 Hardhat×14,conf 降至 0.15 不变;现 10 类同图 25 检出含 Person×9),摔倒图零检出(Fall-Detected 未命中),.pt 原生推理复现同样结果(排除 onnx 导出损失),CPU 时延 566ms vs 现模型 ~270ms 慢一倍;README mAP50=0.79 与实拍泛化严重不符——**现有 ppe_site_10cls 保留**;14cls onnx 未入 models/;后续升级路线转向自训(SH17 类别体系,见 safebot-go 04 §3.7 许可注记) | 2026-09-27 |
 | 26 | barcode 条码定位(新能力槽,只定位不解码) | G1 | Piero2411/YOLOV8s-Barcode-Detection | ⬜ | | |
 | 27 | fire equipment 消防器材检测(新能力槽,与 /fire-smoke 互补) | G1 | HF 微调版,落地时比选 | ⬜ | | |
 | 28 | smoking/calling 行为违章检测(新能力槽) | G1 | HF 微调版(repo 未验证,先确认存在性) | ⬜ | | |
@@ -131,6 +131,7 @@
 
 ## 变更记录
 
+- 2026-09-27:**任务 22/25 完成**。任务 22 pose_rules 上线:POST /pose-rules(图片进,姿态推理+几何规则出,fall 三票制/raise_hand/skip_low_quality 三类事件,DTO 含 keypoints)+ /ui 摔倒检测卡;任务 25 PPE 升级比选完成,结论不换(证据见任务行,核心是候选模型实拍 Person 召回为零且 .pt 原生复现)。
 - 2026-09-27:**状态过时部分校正**。任务 4 face_attribute 挂起(年龄=PIPL 合规红线,表情/性别价值低,落地优先级表同步移除);吸收计划侧阶段 0/3/5 标完成(fork 早已换 git 依赖、HTTP 参数层与 /detect/batch 已上线、safe-bot 适配由 safebot-go 原生完成并类别字典化)。另注:批 1.5 任务 18/19(ppe/fire-smoke)已于 2026-09-26 随新版二进制生产部署并激活(此前生产跑旧版无这些端点,系 argus.env 漏配四引擎变量,已用 warden 内联环境补齐);任务 19 的"比选更强模型"建议仍有效。
 - 2026-09-21:**模型生态调研结论编排入表**(调研全文见 `model-ecosystem-research.md`,检索时点 2026-09-21):新增批 1.6(场景即插槽,任务 23-29:YOLOE 开放词汇/crack/ppe 升级/barcode/消防器材/行为违章/YOLO26 换代)与批 6(小契约能力,任务 30-34:/embed/密度图/图像返回契约/仪表读数/图对匹配);修正任务 20 状态(`/quality` 已上线纯算法,此前误列待接入);任务 21 标注对任务 32 的依赖;新增"落地优先级"节(Top5:白捡项→YOLOE→crack+ppe→/embed→图像增强)。架构发现:上游原生支持 YOLOE/YOLO26 标准布局,开放词汇与模型换代均零契约改动。
 - 2026-09-21:插入批 1.5 场景批(PPE/火烟/IQA/增强/姿态规则),按企业价值排序。**方向修订**:GPU(吸收计划阶段 4)暂缓,主攻 CPU 线——批 1 解卡(网络已恢复)→ 场景批 → 跨帧跟踪 + 事件规则层(新工作流,另立方案)→ /metrics;阶段 2 动态化仍是唯一重构级合并点。同日完成上游 javpower 1c6ed67(OCR 旋转四边形)同步进 fork(01f66db)与 argus 依赖更新(ba3f83e),E2E 验证旋转文字识别恢复。

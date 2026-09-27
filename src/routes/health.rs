@@ -147,6 +147,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
         .route("/qr", post(crate::routes::text::qr))
         .route("/quality", post(crate::routes::analysis::quality))
         .route("/pose", post(crate::routes::analysis::pose))
+        .route("/pose-rules", post(crate::routes::pose_rules::pose_rules))
         .route("/depth", post(crate::routes::analysis::depth))
         .route("/human-parsing", post(crate::routes::analysis::human_parsing))
         .layer(axum::extract::DefaultBodyLimit::max(max_body))
