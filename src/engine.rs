@@ -265,7 +265,13 @@ impl EngineManager {
                 for _ in 0..pool_size {
                     let p = path.clone();
                     let engine = tokio::task::spawn_blocking(move || {
-                        ClassificationEngine::for_yolo(&p, device)
+                        // 引擎阈值降为 0（softmax 输出 ≥0 恒过）：top-k 列表不再被
+                        // base 默认 0.5 的 top-1 门控清空（家庭照片实测恒 count=0）。
+                        // 门控语义上移到路由层按请求实现（apply_top1_gate），
+                        // 与检测族"构造期低阈值+HTTP 层后过滤"同一纪律。
+                        let mut e = ClassificationEngine::for_yolo(&p, device)?;
+                        e.base.set_confidence_threshold(0.0);
+                        Ok::<_, rust_onnx_infer::VisionError>(e)
                     })
                     .await
                     .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
