@@ -495,6 +495,7 @@ pub async fn face_recognize(
     let elapsed = t0.elapsed().as_millis();
     tracing::info!(endpoint = "face_recognize", count = matches.len(), inference_ms = elapsed as u64, "推理完成");
 
+    let embed_dim = embeddings.first().map(|e| e.len());
     let (model, pipeline) = state.engines.provenance("face_recognition").await;
     Ok(Json(json!({
         "status": "ok",
@@ -505,6 +506,7 @@ pub async fn face_recognize(
             "matches": matches,
             "count": matches.len(),
             "embeddings": embeddings,
+            "embed_dim": embed_dim,
             "inference_ms": elapsed,
         }
     })))
