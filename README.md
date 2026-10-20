@@ -8,13 +8,13 @@
 |---|---|---|
 | `POST /detect` | 目标检测（支持 SAHI 切片 `sahi=true`；请求级过滤 `confidence`/`target_classes`/`roi`，见下） | YOLO |
 | `POST /detect/batch` | 逐图批量检测（JSON `image_paths` 为**服务端本地路径**；单图失败带 `error` 不炸整批，每图独立背压 permit；过滤参数同 `/detect`） | YOLO |
-| `POST /classify` | 图像分类 Top-K（`top_k`，默认 5，上限 50） | YOLOv8n-CLS |
+| `POST /classify` | 图像分类 Top-K（`top_k` 默认 5 上限 50；`confidence` 默认 0.5 为 **top-1 门控**：top-1 低于它返回空列表，过线返回全量 top-k 含低分尾巴——复现历史语义；显式传低值如 0.05 得到带各自 conf 的真实 top-k） | YOLOv8n-CLS |
 | `POST /detect/obb` | 旋转框检测（自动识别传统 / End2End 布局） | YOLOv8n-OBB |
 | `POST /segmentation` | 实例分割（响应 `data.segments[]`：检测字段 + `area_ratio` 掩码占比 + 64×64 `mask_preview` 下采样预览） | YOLOv8m-seg |
 | `POST /ppe` | 工地 PPE 检测（10 类含 NO-Hardhat/NO-Safety Vest 等违章反类；参数语义同 `/detect`：SAHI/confidence/target_classes/roi） | PPE v8 10cls |
 | `POST /fire-smoke` | 火焰/烟雾检测（fire/smoke 两类；参数语义同 `/detect`） | Fire-Smoke v8n |
-| `POST /face/detect` | 人脸检测（bbox + 5 关键点） | YuNet |
-| `POST /face/recognize` | 人脸识别（128 维嵌入 + 余弦相似度比对） | SFace |
+| `POST /face/detect` | 人脸检测（bbox + 5 关键点；`min_face_px` bbox 短边下限 / `max_faces` 按置信度取前 N，默认均关） | YuNet |
+| `POST /face/recognize` | 人脸识别（128 维嵌入 + 余弦相似度比对；matches 含 5 关键点 landmarks 与 data.embed_dim；门控参数同 /face/detect，过滤发生在提向量之前） | SFace |
 | `POST /reid` | 行人重识别特征（multipart `file` + 可选 `boxes`=[[x1,y1,x2,y2],...] 像素框列表，缺省整图；逐框输出 512 维 L2 归一化 embedding，跨框相似度由消费方做余弦） | OSNet x1.0 |
 | `POST /ocr` | OCR 文本检测 + 识别 | PP-OCRv5 |
 | `POST /license-plate` | 车牌检测 + 识别（mnet 关键点矫正 + LPRNet） | mnet / LPRNet |
@@ -23,11 +23,18 @@
 | `POST /pose` | 人体姿态（COCO 17 关键点） | YOLOv8n-Pose |
 | `POST /depth` | 单目深度估计（min/max/mean + 64×64 预览） | Depth Anything V2 |
 | `POST /human-parsing` | 人体解析（ATR 18 类部件占比） | SegFormer-B2 |
-| `GET /health?deep=true` | 健康检查（浅检返回已加载引擎；deep=true 额外返回已配置能力清单） | — |
+| `POST /face/recognize/batch` | 批量人脸识别（多 `file` 字段 ≤16/请求，共享 known_embeddings/threshold/门控参数；逐图串行，单图失败带 `error` 不炸整批，每图独立背压 permit；省 HTTP 往返而非推理并行） | SFace |
+| `GET /health?deep=true` | 健康检查（浅检返回已加载引擎 + `backpressure` 对象：in_flight/queued_total/rejected_total/acquire_timeout_total；deep=true 额外返回已配置能力清单） | — |
 | `GET /models` | 能力键控的模型清单（`configured`/`loaded`/`models`）。**注意与 yolo-rs 同名端点语义不同**：yolo-rs 是目录扫描（任意 *.onnx 即可用），本服务 models/ 混装异构模型，故按能力键控；消费方取 `data.capabilities.detection.models` 得目标检测可用模型名 | — |
 | `GET /ui` | 内嵌 Web 控制台：浏览器拖拽图片、选择处理方式、可视化标注结果（页面免认证加载，API 调用仍需 key） | — |
 
 所有模型按需懒加载（`tokio::OnceCell`），推理经 `spawn_blocking` + 信号量背压。
+
+### 通用响应契约
+
+- **推理响应**均含溯源与背压字段：`data.model`（`文件名#sha256前12位`，多模型端点 `+` 拼接）、`data.pipeline`（管线标识，换模型/预处理语义变化即变——向量失效判定键）、`data.queue_ms`（等待背压 permit 耗时，与 `inference_ms` 分开）。
+- **解码边界统一应用 EXIF Orientation**（`image` crate 不隐式变换，实测 orientation=6 照片 2 脸 vs 摆正 38 脸）；bbox 坐标空间为摆正后图像。无 EXIF 的输入（摄像头帧/PNG）零开销不受影响。
+- **错误信封**：逻辑错误 HTTP 200 + `{"status":"error","data":{"error":原文,"code":...,"retryable":...}}`。`code` ∈ `bad_request`/`too_large`（body 超 20MB 上限或图像超像素闸）/`unsupported_image`/`model_not_configured`/`capability_disabled`/`overload`/`inference_failed`/`internal`；仅 `overload` 可重试。
 
 ### 检测请求级过滤（`/detect` multipart 文本字段，`/detect/batch` JSON 同名字段）
 
@@ -59,6 +66,7 @@ cargo build --release --jobs 6
 | `ARGUS_DEVICE` | cpu | cpu / cuda |
 | `ARGUS_AUTH_TOKEN` | 无 | 设置后启用 API key（`X-API-Key` 或 `Authorization: Bearer`） |
 | `ARGUS_MAX_BODY_MB` | 20 | 请求体上限 |
+| `ARGUS_MAX_IMAGE_PIXELS` | 0 | 解码前像素总数闸门（decoder.dimensions() 预检，防 20MB 内亿像素 PNG 解码炸弹；0=不限，部署建议 6000 万） |
 | `ARGUS_MAX_CONCURRENT_INFERENCE` | 0 | 并发推理上限（0=不限） |
 | `ARGUS_ENGINE_POOL` | 1 | 每引擎实例池大小。>1 时同模型多实例并行推理（多路客户端同模型并发不再串行）。**代价**：内存 = 模型大小 × 池大小 × 已加载引擎数；CPU 预算 = 池大小 × 4（ORT 线程）× 引擎数 ≈ 核数。与多实例部署可叠加（实例数 × 池大小统算） |
 | `ARGUS_<CAP>_POOL` | 回退 `ARGUS_ENGINE_POOL` | 单能力独立设池，覆盖全局值（如 `ARGUS_OCR_POOL=1`）。`<CAP>` 为能力键大写，同 `WARMUP_SIZE`。内存治理杠杆：内存由 ORT 每 session 运行时开销主导（非模型文件大小），`OCR`/`HUMAN_PARSING`/`DEPTH` 设 1 即拿回大头（池 4 全能力 12.4GB，此三项占 ~10.3GB） |
