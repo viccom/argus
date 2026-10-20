@@ -74,31 +74,38 @@ struct KnownFace {
 
 struct FaceDetectParams {
     file: Vec<u8>,
+    gate: FaceGate,
 }
 
 async fn parse_face_multipart(mut multipart: Multipart) -> Result<FaceDetectParams, AppError> {
     let mut file: Option<Vec<u8>> = None;
+    let mut gate_raw = (None, None);
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| crate::routes::common::map_field_err(e, "multipart 解析失败"))?
     {
         let name = field.name().unwrap_or_default().to_string();
-        if name == "file" {
-            file = Some(
-                field
-                    .bytes()
-                    .await
-                    .map_err(|e| crate::routes::common::map_field_err(e, "读取文件失败"))?
-                    .to_vec(),
-            );
-        } else {
-            // 消费未知字段避免 body 残留
-            let _ = field.bytes().await;
+        match name.as_str() {
+            "file" => {
+                file = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| crate::routes::common::map_field_err(e, "读取文件失败"))?
+                        .to_vec(),
+                );
+            }
+            "min_face_px" => gate_raw.0 = parse_gate_u32(&name, field).await?,
+            "max_faces" => gate_raw.1 = parse_gate_usize(&name, field).await?,
+            _ => {
+                // 消费未知字段避免 body 残留
+                let _ = field.bytes().await;
+            }
         }
     }
     let file = file.ok_or_else(|| AppError::BadRequest("缺少 file 字段".into()))?;
-    Ok(FaceDetectParams { file })
+    Ok(FaceDetectParams { file, gate: FaceGate::from_raw(gate_raw)? })
 }
 
 struct FaceRecognizeParams {
@@ -106,6 +113,7 @@ struct FaceRecognizeParams {
     known: Vec<KnownFace>,
     /// 余弦相似度匹配阈值，低于该值不认作匹配。默认 0.5。
     threshold: f32,
+    gate: FaceGate,
 }
 
 async fn parse_recognize_multipart(
@@ -114,6 +122,7 @@ async fn parse_recognize_multipart(
     let mut file: Option<Vec<u8>> = None;
     let mut known_json: Option<String> = None;
     let mut threshold: Option<f32> = None;
+    let mut gate_raw = (None, None);
 
     while let Some(field) = multipart
         .next_field()
@@ -143,6 +152,8 @@ async fn parse_recognize_multipart(
                     );
                 }
             }
+            "min_face_px" => gate_raw.0 = parse_gate_u32(&name, field).await?,
+            "max_faces" => gate_raw.1 = parse_gate_usize(&name, field).await?,
             _ => {
                 let _ = field.bytes().await;
             }
@@ -160,7 +171,90 @@ async fn parse_recognize_multipart(
         file,
         known,
         threshold: threshold.unwrap_or(0.5),
+        gate: FaceGate::from_raw(gate_raw)?,
     })
+}
+
+// ---- 数量/尺寸门控 ----
+
+/// 人脸门控参数（`/face/detect` 与 `/face/recognize` 共用）。
+///
+/// 成本语义：门控发生在**提向量之前**——集会照曾为 38 张背景小脸逐一提向量
+/// （1475ms），消费方不需要它们。默认全关，行为与历史完全一致。
+#[derive(Clone, Copy, Default)]
+struct FaceGate {
+    /// bbox 短边绝对像素下限，低于该值的脸被丢弃。0 = 不限。
+    min_face_px: u32,
+    /// 按检测置信度取前 N 张脸。0 = 不限。
+    max_faces: usize,
+}
+
+impl FaceGate {
+    fn from_raw(raw: (Option<u32>, Option<usize>)) -> Result<Self, AppError> {
+        Ok(Self {
+            min_face_px: raw.0.unwrap_or(0),
+            max_faces: raw.1.unwrap_or(0),
+        })
+    }
+
+    fn is_off(&self) -> bool {
+        self.min_face_px == 0 && self.max_faces == 0
+    }
+}
+
+async fn parse_gate_u32(
+    field_name: &str,
+    field: axum::extract::multipart::Field<'_>,
+) -> Result<Option<u32>, AppError> {
+    parse_gate_num::<u32>(field_name, field).await
+}
+
+async fn parse_gate_usize(
+    field_name: &str,
+    field: axum::extract::multipart::Field<'_>,
+) -> Result<Option<usize>, AppError> {
+    parse_gate_num::<usize>(field_name, field).await
+}
+
+async fn parse_gate_num<T: std::str::FromStr>(
+    field_name: &str,
+    field: axum::extract::multipart::Field<'_>,
+) -> Result<Option<T>, AppError> {
+    let text = field_text(field).await?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    text.parse::<T>()
+        .map(Some)
+        .map_err(|_| AppError::BadRequest(format!("{field_name} 无法解析: {text}")))
+}
+
+/// 应用门控：先按 bbox 短边过滤，再按检测置信度降序取前 N（稳定排序，
+/// 同分保持原检测顺序）。开启 max_faces 时返回序列为置信度降序。
+fn gate_faces(faces: Vec<FaceDetectResult>, gate: FaceGate) -> Vec<FaceDetectResult> {
+    if gate.is_off() {
+        return faces;
+    }
+    let mut kept: Vec<FaceDetectResult> = faces
+        .into_iter()
+        .filter(|f| {
+            gate.min_face_px == 0 || {
+                let d = &f.detection;
+                let short_side = (d.x2() - d.x1()).min(d.y2() - d.y1());
+                short_side >= f64::from(gate.min_face_px)
+            }
+        })
+        .collect();
+    if gate.max_faces > 0 && kept.len() > gate.max_faces {
+        kept.sort_by(|a, b| {
+            b.detection
+                .confidence()
+                .partial_cmp(&a.detection.confidence())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        kept.truncate(gate.max_faces);
+    }
+    kept
 }
 
 // ---- 余弦相似度 ----
@@ -193,6 +287,8 @@ pub async fn face_detect(
 
     let t0 = std::time::Instant::now();
     let faces = pool.run(move |e| e.predict(&image)).await?;
+    // 门控在响应组装前：尺寸/数量过滤按需裁剪检出列表
+    let faces = gate_faces(faces, params.gate);
     let elapsed = t0.elapsed().as_millis();
 
     let dtos: Vec<FaceDetectDto> = faces.iter().map(FaceDetectDto::from).collect();
@@ -227,6 +323,8 @@ pub async fn face_recognize(
     let t0 = std::time::Instant::now();
     let image_clone = image.clone();
     let faces = det_pool.run(move |e| e.predict(&image_clone)).await?;
+    // 门控必须发生在逐脸提向量**之前**——省的就是每脸一次 rec 池推理
+    let faces = gate_faces(faces, params.gate);
 
     // 逐脸提取嵌入(每次经池取实例,天然公平)
     let mut matches: Vec<FaceMatchDto> = Vec::with_capacity(faces.len());
@@ -474,5 +572,115 @@ mod tests {
         assert_eq!(json["confidence"], 0.95);
         assert_eq!(json["landmarks"].as_array().unwrap().len(), 5);
         assert_eq!(json["landmarks"][0]["x"], 30.0);
+    }
+
+
+    /// 通用 multipart 构造：若干文本字段 + 1x1 PNG file 字段；post 到指定路径。
+    async fn post_multipart(path: &str, text_fields: &[(&str, &str)]) -> String {
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        let boundary = "----testboundary";
+        let mut full = Vec::new();
+        for (name, value) in text_fields {
+            full.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        full.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"t.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        full.extend_from_slice(&buf.into_inner());
+        full.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "multipart/form-data; boundary=----testboundary")
+                    .body(Body::from(full))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        body_text(resp).await
+    }
+
+    // ---- A3 门控单测 ----
+
+    fn gate_face(x1: f64, y1: f64, x2: f64, y2: f64, conf: f64) -> FaceDetectResult {
+        let det = rust_onnx_infer::model::Detection::new("face", 0, x1, y1, x2, y2, conf);
+        FaceDetectResult::new(det, Vec::new())
+    }
+
+    #[test]
+    fn gate_off_by_default_should_keep_all_faces_in_original_order() {
+        // 默认全关：行为与历史完全一致（顺序、数量均不动）
+        let faces = vec![
+            gate_face(0., 0., 100., 200., 0.6),
+            gate_face(0., 0., 10., 10., 0.9),
+        ];
+        let gated = gate_faces(faces, FaceGate::default());
+        assert_eq!(gated.len(), 2);
+        assert_eq!(gated[0].detection.confidence(), 0.6, "不开 max_faces 不得重排");
+    }
+
+    #[test]
+    fn gate_min_face_px_should_drop_small_boxes_by_short_side() {
+        let faces = vec![
+            gate_face(0., 0., 100., 200., 0.6), // 短边 100
+            gate_face(0., 0., 79., 300., 0.9),  // 短边 79 < 80
+            gate_face(0., 0., 80., 80., 0.5),   // 短边恰为 80（边界含）
+        ];
+        let gated = gate_faces(
+            faces,
+            FaceGate { min_face_px: 80, max_faces: 0 },
+        );
+        assert_eq!(gated.len(), 2, "短边 79 应被丢弃，80 保留（>= 语义）");
+    }
+
+    #[test]
+    fn gate_max_faces_should_keep_top_n_by_confidence() {
+        let faces = vec![
+            gate_face(0., 0., 100., 100., 0.6),
+            gate_face(0., 0., 100., 100., 0.95),
+            gate_face(0., 0., 100., 100., 0.8),
+        ];
+        let gated = gate_faces(faces, FaceGate { min_face_px: 0, max_faces: 2 });
+        assert_eq!(gated.len(), 2);
+        assert_eq!(gated[0].detection.confidence(), 0.95, "按置信度降序");
+        assert_eq!(gated[1].detection.confidence(), 0.8);
+    }
+
+    #[test]
+    fn gate_combined_should_filter_then_truncate() {
+        let faces = vec![
+            gate_face(0., 0., 200., 200., 0.7),  // 过尺寸
+            gate_face(0., 0., 10., 200., 0.99),  // 被尺寸过滤
+            gate_face(0., 0., 150., 150., 0.9),  // 过尺寸
+        ];
+        let gated = gate_faces(faces, FaceGate { min_face_px: 50, max_faces: 1 });
+        assert_eq!(gated.len(), 1);
+        assert_eq!(gated[0].detection.confidence(), 0.9, "先滤后取，高置信小脸不得挤掉大脸");
+    }
+
+    #[test]
+    fn gate_max_faces_zero_or_equal_should_not_reorder() {
+        let faces = vec![gate_face(0., 0., 9., 9., 0.6), gate_face(0., 0., 9., 9., 0.9)];
+        let gated = gate_faces(faces, FaceGate { min_face_px: 5, max_faces: 0 });
+        assert_eq!(gated[0].detection.confidence(), 0.6, "max_faces=0 只滤不排");
+    }
+
+    #[tokio::test]
+    async fn face_detect_with_invalid_min_face_px_returns_bad_request() {
+        let text = post_multipart("/face/detect", &[("min_face_px", "-5"), ("file", "@png")]).await;
+        assert!(text.contains("min_face_px"), "应指出参数无法解析: {text}");
+        assert!(text.contains("bad_request"), "应为 bad_request 码: {text}");
     }
 }
