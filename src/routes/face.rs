@@ -59,6 +59,9 @@ struct FaceMatchDto {
     face_index: usize,
     confidence: f64,
     bbox: [f64; 4],
+    /// 5 关键点（B1）：与 /face/detect 同源同值，消费方做姿态/尺寸质量门控
+    /// （低头/侧脸不进簇心）无需二次调用检测端点。
+    landmarks: Vec<KeypointDto>,
 }
 
 // ---- /face/recognize 的已知人脸库条目 ----
@@ -364,6 +367,12 @@ pub async fn face_recognize(
             face_index: idx,
             confidence: d.confidence(),
             bbox: [d.x1(), d.y1(), d.x2(), d.y2()],
+            landmarks: face
+                .landmarks
+                .iter()
+                .copied()
+                .map(KeypointDto::from)
+                .collect(),
         });
     }
     let elapsed = t0.elapsed().as_millis();
@@ -688,5 +697,26 @@ mod tests {
         let text = post_multipart("/face/detect", &[("min_face_px", "-5"), ("file", "@png")]).await;
         assert!(text.contains("min_face_px"), "应指出参数无法解析: {text}");
         assert!(text.contains("bad_request"), "应为 bad_request 码: {text}");
+    }
+
+    #[test]
+    fn face_match_dto_should_carry_landmarks_for_quality_gating() {
+        // B1：消费方靠 landmarks 做姿态门控（眼距/roll 角），缺字段即断
+        let dto = FaceMatchDto {
+            label: None,
+            similarity: 0.0,
+            face_index: 0,
+            confidence: 0.9,
+            bbox: [1.0, 2.0, 3.0, 4.0],
+            landmarks: vec![
+                KeypointDto { x: 1.5, y: 2.0, score: 0.9 },
+                KeypointDto { x: 2.5, y: 2.0, score: 0.5 },
+            ],
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        let lms = json["landmarks"].as_array().unwrap();
+        assert_eq!(lms.len(), 2);
+        assert_eq!(lms[0]["x"], 1.5);
+        assert_eq!(lms[1]["score"], 0.5);
     }
 }
