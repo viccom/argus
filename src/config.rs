@@ -258,8 +258,6 @@ impl Config {
         self.pools.get(capability).copied().unwrap_or(self.engine_pool)
     }
 
-    /// 列出已配置模型路径的引擎能力名（deep health 与启动日志用）。
-    /// 命名与 `EngineManager::list_loaded` 一致，便于对照"配置了未加载"状态。
     /// 能力键 → 模型文件路径列表（A4 溯源用）。单模型能力 1 项；OCR/车牌 2 项；
     /// 未配置返回空。与 EngineManager 各 loader 读取的 env 一一对应。
     pub fn model_paths_for(&self, capability: &str) -> Vec<std::path::PathBuf> {
@@ -291,6 +289,8 @@ impl Config {
         }
     }
 
+    /// 列出已配置模型路径的引擎能力名（deep health 与启动日志用）。
+    /// 命名与 `EngineManager::list_loaded` 一致，便于对照"配置了未加载"状态。
     pub fn configured_engines(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
         if self.detection_model.is_some() { v.push("detection"); }

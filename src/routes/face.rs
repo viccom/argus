@@ -370,8 +370,14 @@ async fn parse_face_batch_multipart(mut multipart: Multipart) -> Result<FaceBatc
     })
 }
 
+/// 单图识别结果：(匹配列表, 向量列表, queue_ms, inference_ms)。
+type RecognizeOutcome = (Vec<FaceMatchDto>, Vec<Vec<f32>>, u128, u128);
+
 /// 单图识别全流程（detect → 门控 → 逐脸提向量 → 比对），单端点与批量共享。
 /// permit 在此获取：整段（检测 + 逐脸 extract）受同一背压保护。
+///
+/// 计时必须在 permit 之后起表：README 契约要求 `inference_ms` 不含排队时间，
+/// 由调用方在外层计时会把 queue_ms 重复计入（4 并发下实测 inference_ms 全等于排队时长）。
 #[allow(clippy::too_many_arguments)]
 async fn recognize_faces(
     state: &AppState,
@@ -379,7 +385,7 @@ async fn recognize_faces(
     known: &[KnownFace],
     threshold: f32,
     gate: FaceGate,
-) -> Result<(Vec<FaceMatchDto>, Vec<Vec<f32>>, u128), AppError> {
+) -> Result<RecognizeOutcome, AppError> {
     let det_pool = state.engines.face_detection().await?;
     let rec_pool = state.engines.face_recognition().await?;
 
@@ -431,8 +437,8 @@ async fn recognize_faces(
                 .collect(),
         });
     }
-    let _ = t0;
-    Ok((matches, embeddings, queue_ms))
+    let inference_ms = t0.elapsed().as_millis();
+    Ok((matches, embeddings, queue_ms, inference_ms))
 }
 
 // ---- handlers ----
@@ -483,8 +489,7 @@ pub async fn face_recognize(
     let params = parse_recognize_multipart(multipart).await?;
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
-    let t0 = std::time::Instant::now();
-    let (matches, embeddings, queue_ms) = recognize_faces(
+    let (matches, embeddings, queue_ms, elapsed) = recognize_faces(
         &state,
         image,
         &params.known,
@@ -492,7 +497,6 @@ pub async fn face_recognize(
         params.gate,
     )
     .await?;
-    let elapsed = t0.elapsed().as_millis();
     tracing::info!(endpoint = "face_recognize", count = matches.len(), inference_ms = elapsed as u64, "推理完成");
 
     let embed_dim = embeddings.first().map(|e| e.len());
@@ -531,39 +535,36 @@ pub async fn face_recognize_batch(
     let mut failed = 0usize;
     for (idx, bytes) in params.files.into_iter().enumerate() {
         let item = match decode_image(bytes, state.config.max_image_pixels).await {
-            Ok(image) => {
-                let per_image_t0 = std::time::Instant::now();
-                match recognize_faces(
-                    &state,
-                    image,
-                    &params.known,
-                    params.threshold,
-                    params.gate,
-                )
-                .await
-                {
-                    Ok((matches, embeddings, queue_ms)) => {
-                        let embed_dim = embeddings.first().map(|e| e.len());
-                        FaceBatchItem::Ok {
-                            file_index: idx,
-                            count: matches.len(),
-                            queue_ms,
-                            matches,
-                            embeddings,
-                            embed_dim,
-                            inference_ms: per_image_t0.elapsed().as_millis(),
-                        }
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        tracing::warn!(file_index = idx, error = %e, "批量识别单图失败（已隔离）");
-                        FaceBatchItem::Err {
-                            file_index: idx,
-                            error: e.to_string(),
-                        }
+            Ok(image) => match recognize_faces(
+                &state,
+                image,
+                &params.known,
+                params.threshold,
+                params.gate,
+            )
+            .await
+            {
+                Ok((matches, embeddings, queue_ms, inference_ms)) => {
+                    let embed_dim = embeddings.first().map(|e| e.len());
+                    FaceBatchItem::Ok {
+                        file_index: idx,
+                        count: matches.len(),
+                        queue_ms,
+                        matches,
+                        embeddings,
+                        embed_dim,
+                        inference_ms,
                     }
                 }
-            }
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(file_index = idx, error = %e, "批量识别单图失败（已隔离）");
+                    FaceBatchItem::Err {
+                        file_index: idx,
+                        error: e.to_string(),
+                    }
+                }
+            },
             Err(e) => {
                 failed += 1;
                 tracing::warn!(file_index = idx, error = %e, "批量识别单图解码失败（已隔离）");
@@ -608,6 +609,7 @@ mod tests {
     use crate::routes::health::{build_router, AppState};
     use axum::body::Body;
     use axum::http::Request;
+    use std::path::PathBuf;
     use tower::ServiceExt;
 
     fn test_state() -> AppState {
@@ -797,7 +799,6 @@ mod tests {
         assert_eq!(json["landmarks"][0]["x"], 30.0);
     }
 
-
     /// 通用 multipart 构造：若干文本字段 + 1x1 PNG file 字段；post 到指定路径。
     async fn post_multipart(path: &str, text_fields: &[(&str, &str)]) -> String {
         let img = image::DynamicImage::new_rgb8(1, 1);
@@ -928,6 +929,73 @@ mod tests {
         assert_eq!(lms[1]["score"], 0.5);
     }
 
+    // ---- 计时契约 ----
+
+    /// inference_ms 必须不含排队时间（README 契约：queue_ms 与 inference_ms 分开）。
+    ///
+    /// 构造真实竞争：占满唯一 permit 后发起 /face/recognize，请求必然排队；
+    /// 排队期间放开 permit，使它以真实的 queue_ms 完成。若计时起点在 permit
+    /// 之前（历史缺陷），inference_ms 会包含那 200ms 排队窗口而穿帮。
+    ///
+    /// 无模型时该端点报 model_not_configured，走不到计时——因此本测试只在
+    /// 模型可用时执行，否则跳过并说明原因，不以假通过掩盖覆盖缺口。
+    #[tokio::test]
+    async fn recognize_timing_should_exclude_queue_wait() {
+        use crate::routes::common::acquire_permit;
+
+        let models_dir = PathBuf::from(
+            std::env::var("ARGUS_MODELS_DIR").unwrap_or_else(|_| "/models".into()),
+        );
+        let det = models_dir.join("face_detection_yunet_2023mar.onnx");
+        let rec = models_dir.join("face_recognition_sface_2021dec.onnx");
+        if !det.exists() || !rec.exists() {
+            eprintln!("跳过：未配置人脸模型（需 ARGUS_MODELS_DIR 指向真实模型）");
+            return;
+        }
+
+        let config = Config {
+            face_det_model: Some(det),
+            face_rec_model: Some(rec),
+            max_concurrent_inference: 1,
+            acquire_timeout_ms: 5_000,
+            ..Default::default()
+        };
+        let state = AppState::new(config.clone(), EngineManager::new(config));
+
+        // 预热：引擎加载发生在 permit 之前，未预热会压缩可测排队窗口
+        state.engines.face_detection().await.unwrap();
+        state.engines.face_recognition().await.unwrap();
+
+        let held = acquire_permit(&state).await.unwrap();
+        let app = build_router(state.clone(), None);
+        let body = multipart_with_png();
+        let req = Request::post("/face/recognize")
+            .header("content-type", "multipart/form-data; boundary=----testboundary")
+            .body(Body::from(body))
+            .unwrap();
+
+        // 请求在排队；固定等待 400ms 后释放 permit，使排队窗口确定可测
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            drop(held);
+        });
+        let resp = app.oneshot(req).await.unwrap();
+        release.await.unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text(resp).await).unwrap();
+        let data = &json["data"];
+        let queue_ms = data["queue_ms"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("应返回 queue_ms，实际响应: {json}"));
+        assert!(queue_ms >= 300, "应确实排过队，实际 queue_ms={queue_ms}");
+        let inference_ms = data["inference_ms"].as_u64().expect("应返回 inference_ms");
+        assert!(
+            inference_ms < queue_ms,
+            "inference_ms({inference_ms}) 不应包含排队时间({queue_ms})"
+        );
+    }
+
     // ---- B3 批量端点测试 ----
 
     async fn post_batch_files(n_files: usize, extra: &[(&str, &str)]) -> String {
@@ -955,41 +1023,16 @@ mod tests {
                 .as_bytes(),
             );
             body.extend_from_slice(&png);
-            body.extend_from_slice(format!("\r\n--{b}--\r\n", b = boundary).as_bytes());
-            // 修正：终止段只应出现一次，去掉上面这行的终止符，循环外加
+            body.extend_from_slice(b"\r\n");
         }
-        // 移除误加的中间终止段，统一以最终终止段收尾
-        // （上面循环里每图后都写了 --boundary--，需要去掉前面的，只保留最后一个）
-        // 简化处理：重建 body
-        let mut body2 = Vec::new();
-        for (name, value) in extra {
-            body2.extend_from_slice(
-                format!(
-                    "--{b}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n",
-                    b = boundary
-                )
-                .as_bytes(),
-            );
-        }
-        for _ in 0..n_files {
-            body2.extend_from_slice(
-                format!(
-                    "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"t.png\"\r\nContent-Type: image/png\r\n\r\n",
-                    b = boundary
-                )
-                .as_bytes(),
-            );
-            body2.extend_from_slice(&png);
-            body2.extend_from_slice(b"\r\n");
-        }
-        body2.extend_from_slice(format!("--{b}--\r\n", b = boundary).as_bytes());
+        body.extend_from_slice(format!("--{b}--\r\n", b = boundary).as_bytes());
 
         let app = build_router(test_state(), None);
         let resp = app
             .oneshot(
                 Request::post("/face/recognize/batch")
                     .header("content-type", "multipart/form-data; boundary=----testboundary")
-                    .body(Body::from(body2))
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
