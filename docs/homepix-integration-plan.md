@@ -17,7 +17,7 @@
 
 | 文件 | 内容 | 改动前实测 |
 |---|---|---|
-| `orient_raw.jpg` | 4032×3024，EXIF orientation=6 | /face/detect → 2 脸 conf 0.72/0.64 |
+| `orient_raw.jpg` | 4032×3024，像素侧躺 | /face/detect → 2 脸 conf 0.72/0.64。**2026-10-20 复核：该文件实无 EXIF 段**（APP0 JFIF 后直达 DQT/SOF），无取向信号——任何解码器无法也不应旋转它；原表"orientation=6"描述与文件实态不符，推断制夹具时标签被剥离。真验证夹具为 `orient_exif6.jpg`（Pillow 自 orient_baked 逆时针转 90° + EXIF 274=6 构造），A1 修复后检出 38 脸与摆正基线一致 |
 | `orient_baked.jpg` | 同一张摆正后 | 38 脸 conf 0.93 起；/face/recognize 38 向量 1475ms |
 | `family3.jpg` | 三人合影 | 3 脸；recognize 53ms |
 | `big15mp.jpg` | 海滩七人 | /detect 16 检出 |
@@ -64,4 +64,5 @@
 
 ## 变更记录
 
+- 2026-10-20（晚）：**E2E 全电池复验通过后部署生产**（ad-hoc :7099 debug 实例，逐项证据）：A1 决胜——orient_exif6 自动摆正 38 脸==摆正基线、无标签图回归不变；A2——cake_tight 默认 count=0 保持、confidence=0.05 得 5 条（top1 shower_curtain 0.461）、1.5 越界 bad_request；A3——min_face_px=80 得 14 脸全数短边≥81.2、max_faces=7 得 7 向量、不传参数 big15mp=10==基线；A5——25MB too_large+ARGUS_MAX_BODY_MB 提示、坏图 unsupported_image；B1——landmarks 5 点/脸、embed_dim=128（E2E 抓到单图响应 embed_dim 被 B5 重构误删，a4297b8 补回）；B3——3 图含 1 坏 → 2 成功 + 1 隔离错误；B5——backpressure 对象 + queue_ms 空闲为 0；**回归**——detect/face_detect/face_recognize 功能字段与生产基线逐位一致（仅 inference_ms 因 debug 构建慢 ~10 倍）。夹具发现见 §1（orient_raw 无 EXIF 段）。
 - 2026-10-20：**批 A 全部 + B1/B3/B5 完成并部署**（A5+C2/A1+C3/A2/A3/A4/B1/B3/B5 共 8 项，测试基线 174+1 → 209+1 全绿，clippy 零警告）。原表（homepix 侧成文）经 argus 侧复核后采纳的修正：①A2 无需改上游（set_confidence_threshold 公开，license_plate 先例）；②C2 并入 A5（枚举有码无源问题）；③C3 并入 A1（同一 ImageReader 改造）；④B1 砍掉 crop=true 提前量（等任务 32 契约）；⑤B3 验收校准为"省往返非省推理"；⑥C3 默认 0=不限（向后兼容优先于文档建议的默认 6000 万，部署 env 显式设置）；⑦A1 复核销掉 image 0.25.10 API 可用性待确认项（apply_orientation/NoTransforms 空操作已核实）。
