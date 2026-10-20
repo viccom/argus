@@ -94,29 +94,106 @@ fn decode_image_inner(bytes: Vec<u8>, max_image_pixels: u64) -> Result<image::Dy
     Ok(dyn_img)
 }
 
-/// 获取推理许可（全局并发背压信号量）。
+/// 推理背压观测计数（B5）。原子计数，`/health` 浅检回报 `backpressure` 对象。
+///
+/// 动机：4 并发压 15.9MP 实测 2.4 req/s，但客户端看不出是排队还是失败——
+/// 计数让"过载"可归因（排队饱和 vs 拒绝风暴 vs 超时）。
+#[derive(Default)]
+pub struct InferenceMetrics {
+    /// 当前在途推理数（permit 存活数，RAII 维护）。
+    pub in_flight: std::sync::atomic::AtomicUsize,
+    /// 曾进入排队的请求总数（到达时无空闲 permit）。
+    pub queued_total: std::sync::atomic::AtomicU64,
+    /// 被背压拒绝的请求总数（fail-fast + 排队超时）。
+    pub rejected_total: std::sync::atomic::AtomicU64,
+    /// 其中因排队超时被拒的（fail-fast 模式恒为 0）。
+    pub acquire_timeout_total: std::sync::atomic::AtomicU64,
+}
+
+/// 推理许可守卫：包 OwnedSemaphorePermit，Drop 时递减 in_flight。
+/// `queue_ms` 为等待许可耗时，供响应的 queue_ms 字段（与 inference_ms 分开）。
+pub(crate) struct InferencePermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    metrics: std::sync::Arc<InferenceMetrics>,
+    pub queue_ms: u128,
+}
+
+impl std::fmt::Debug for InferencePermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InferencePermit").field("queue_ms", &self.queue_ms).finish()
+    }
+}
+
+impl Drop for InferencePermit {
+    fn drop(&mut self) {
+        self.metrics
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// 获取推理许可（全局并发背压信号量），带回压观测计数。
 ///
 /// 超时由 `ARGUS_ACQUIRE_TIMEOUT_MS` 控制（默认 30000ms 排队式）：
 /// - `> 0`：在信号量上等待,超时返回 Overload(内网低负载排队更友好);
 /// - `0`：try_acquire fail-fast——耗尽即拒,不排队(生产 GPU 防 arena 雪崩,
 ///   与 max_concurrent=pool_size 对齐)。
-pub(crate) async fn acquire_permit(state: &AppState) -> Result<tokio::sync::OwnedSemaphorePermit, AppError> {
+pub(crate) async fn acquire_permit(state: &AppState) -> Result<InferencePermit, AppError> {
     let timeout_ms = state.config.acquire_timeout_ms;
+    let metrics = state.metrics.clone();
     if timeout_ms == 0 {
         // fail-fast:try_acquire 不阻塞,拿不到立即拒绝
-        state
-            .inference_semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AppError::Overload("推理并发已满(fail-fast),请稍后重试".into()))
+        match state.inference_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => Ok(grant(permit, metrics, 0)),
+            Err(_) => {
+                metrics
+                    .rejected_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(AppError::Overload("推理并发已满(fail-fast),请稍后重试".into()))
+            }
+        }
     } else {
-        tokio::time::timeout(
+        // 到达即无空闲 permit 视为进入排队（近似：并发窗口内到达的请求）
+        if state.inference_semaphore.available_permits() == 0 {
+            metrics
+                .queued_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let t0 = std::time::Instant::now();
+        match tokio::time::timeout(
             Duration::from_millis(timeout_ms),
             state.inference_semaphore.clone().acquire_owned(),
         )
         .await
-        .map_err(|_| AppError::Overload("推理排队超时，请稍后重试".into()))?
-        .map_err(|_| AppError::Internal("信号量已关闭".into()))
+        {
+            Ok(res) => res
+                .map(|permit| grant(permit, metrics, t0.elapsed().as_millis()))
+                .map_err(|_| AppError::Internal("信号量已关闭".into())),
+            Err(_) => {
+                metrics
+                    .rejected_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .acquire_timeout_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(AppError::Overload("推理排队超时，请稍后重试".into()))
+            }
+        }
+    }
+}
+
+fn grant(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    metrics: std::sync::Arc<InferenceMetrics>,
+    queue_ms: u128,
+) -> InferencePermit {
+    metrics
+        .in_flight
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    InferencePermit {
+        _permit: permit,
+        metrics,
+        queue_ms,
     }
 }
 
@@ -233,5 +310,61 @@ mod tests {
         assert!(err.to_string().contains("ARGUS_MAX_IMAGE_PIXELS"));
         // 0 = 不限（默认，复现既有行为）
         assert!(decode_image_inner(png, 0).is_ok());
+    }
+
+    // ---- B5 背压观测单测 ----
+
+    fn metrics_state(max_concurrent: usize, acquire_timeout_ms: u64) -> crate::routes::health::AppState {
+        let config = crate::config::Config {
+            max_concurrent_inference: max_concurrent,
+            acquire_timeout_ms,
+            ..Default::default()
+        };
+        crate::routes::health::AppState::new(
+            config.clone(),
+            crate::engine::EngineManager::new(config),
+        )
+    }
+
+    fn load(m: &InferenceMetrics) -> (usize, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            m.in_flight.load(Relaxed),
+            m.queued_total.load(Relaxed),
+            m.rejected_total.load(Relaxed),
+            m.acquire_timeout_total.load(Relaxed),
+        )
+    }
+
+    #[tokio::test]
+    async fn permit_should_track_in_flight_via_raii() {
+        let state = metrics_state(2, 30_000);
+        assert_eq!(load(&state.metrics).0, 0, "初始在途为 0");
+        let permit = acquire_permit(&state).await.unwrap();
+        assert_eq!(load(&state.metrics).0, 1, "持有期间在途为 1");
+        drop(permit);
+        assert_eq!(load(&state.metrics).0, 0, "释放后归零");
+    }
+
+    #[tokio::test]
+    async fn fail_fast_rejection_should_increment_rejected_not_timeout() {
+        // 容量 1 被占，fail-fast（timeout=0）应立即拒绝并只计 rejected
+        let state = metrics_state(1, 0);
+        let _held = acquire_permit(&state).await.unwrap();
+        let err = acquire_permit(&state).await.unwrap_err();
+        assert!(err.to_string().contains("fail-fast"));
+        let (in_flight, _queued, rejected, timeout) = load(&state.metrics);
+        assert_eq!((in_flight, rejected, timeout), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn queue_timeout_should_increment_both_counters() {
+        // 容量 1 被占，短超时排队应计 rejected + acquire_timeout
+        let state = metrics_state(1, 30);
+        let _held = acquire_permit(&state).await.unwrap();
+        let err = acquire_permit(&state).await.unwrap_err();
+        assert!(err.to_string().contains("排队超时"));
+        let (_, queued, rejected, timeout) = load(&state.metrics);
+        assert_eq!((queued, rejected, timeout), (1, 1, 1), "到达无空闲 permit 计排队，超时计拒绝+超时");
     }
 }

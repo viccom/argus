@@ -288,6 +288,7 @@ enum FaceBatchItem {
         file_index: usize,
         matches: Vec<FaceMatchDto>,
         count: usize,
+        queue_ms: u128,
         embeddings: Vec<Vec<f32>>,
         embed_dim: Option<usize>,
         inference_ms: u128,
@@ -378,11 +379,12 @@ async fn recognize_faces(
     known: &[KnownFace],
     threshold: f32,
     gate: FaceGate,
-) -> Result<(Vec<FaceMatchDto>, Vec<Vec<f32>>), AppError> {
+) -> Result<(Vec<FaceMatchDto>, Vec<Vec<f32>>, u128), AppError> {
     let det_pool = state.engines.face_detection().await?;
     let rec_pool = state.engines.face_recognition().await?;
 
-    let _permit = acquire_permit(state).await?;
+    let permit = acquire_permit(state).await?;
+    let queue_ms = permit.queue_ms;
 
     let t0 = std::time::Instant::now();
     let image_clone = image.clone();
@@ -430,7 +432,7 @@ async fn recognize_faces(
         });
     }
     let _ = t0;
-    Ok((matches, embeddings))
+    Ok((matches, embeddings, queue_ms))
 }
 
 // ---- handlers ----
@@ -444,7 +446,7 @@ pub async fn face_detect(
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.face_detection().await?;
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let faces = pool.run(move |e| e.predict(&image)).await?;
@@ -460,6 +462,7 @@ pub async fn face_detect(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": permit.queue_ms,
             "model": model,
             "pipeline": pipeline,
             "faces": dtos,
@@ -481,7 +484,7 @@ pub async fn face_recognize(
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let t0 = std::time::Instant::now();
-    let (matches, embeddings) = recognize_faces(
+    let (matches, embeddings, queue_ms) = recognize_faces(
         &state,
         image,
         &params.known,
@@ -496,6 +499,7 @@ pub async fn face_recognize(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": queue_ms,
             "model": model,
             "pipeline": pipeline,
             "matches": matches,
@@ -536,11 +540,12 @@ pub async fn face_recognize_batch(
                 )
                 .await
                 {
-                    Ok((matches, embeddings)) => {
+                    Ok((matches, embeddings, queue_ms)) => {
                         let embed_dim = embeddings.first().map(|e| e.len());
                         FaceBatchItem::Ok {
                             file_index: idx,
                             count: matches.len(),
+                            queue_ms,
                             matches,
                             embeddings,
                             embed_dim,

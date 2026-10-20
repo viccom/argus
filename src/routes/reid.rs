@@ -118,7 +118,7 @@ pub async fn reid_embed(
     let count = rects.len();
 
     let pool = state.engines.reid().await?;
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let results = pool
@@ -154,6 +154,7 @@ pub async fn reid_embed(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": permit.queue_ms,
             "model": model,
             "pipeline": pipeline,
             "regions": dtos,

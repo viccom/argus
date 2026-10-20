@@ -18,6 +18,8 @@ pub struct AppState {
     /// 推理背压信号量：限制并发推理数，防止 spawn_blocking 堆积导致 runtime 饥饿。
     /// max_concurrent_inference=0 时容量为 usize::MAX（等效无限制）。
     pub inference_semaphore: Arc<tokio::sync::Semaphore>,
+    /// 推理背压观测计数（B5）：in_flight/queued_total/rejected_total/acquire_timeout_total。
+    pub metrics: Arc<crate::routes::common::InferenceMetrics>,
     pub started_at: std::time::Instant,
 }
 
@@ -32,6 +34,7 @@ impl AppState {
             config: Arc::new(config),
             engines: Arc::new(engines),
             inference_semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+            metrics: Arc::new(crate::routes::common::InferenceMetrics::default()),
             started_at: std::time::Instant::now(),
         }
     }
@@ -56,12 +59,21 @@ pub async fn health(
     Query(query): Query<HealthQuery>,
 ) -> Json<Value> {
     let engines = state.engines.list_loaded();
+    use std::sync::atomic::Ordering::Relaxed;
+    let m = &state.metrics;
     let mut body = json!({
         "status": "healthy",
         "device": state.config.device,
         "engines": engines,
         "version": crate::version::version_string(),
         "uptime_s": state.started_at.elapsed().as_secs(),
+        "backpressure": {
+            "max_concurrent": state.config.max_concurrent_inference,
+            "in_flight": m.in_flight.load(Relaxed),
+            "queued_total": m.queued_total.load(Relaxed),
+            "rejected_total": m.rejected_total.load(Relaxed),
+            "acquire_timeout_total": m.acquire_timeout_total.load(Relaxed),
+        },
     });
     if query.deep.unwrap_or(false) {
         let configured: Vec<_> = state
@@ -360,5 +372,19 @@ mod tests {
             .unwrap();
         let text = body_text(resp).await;
         assert!(text.contains("缺少"), "应拒绝无认证请求: {text}");
+    }
+
+    #[tokio::test]
+    async fn health_should_report_backpressure_counters() {
+        // B5：客户端要能区分"排队饱和"与"拒绝风暴"，浅检必须带计数
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let text = body_text(resp).await;
+        for field in ["backpressure", "in_flight", "queued_total", "rejected_total", "acquire_timeout_total"] {
+            assert!(text.contains(field), "浅检应含 {field}: {text}");
+        }
     }
 }

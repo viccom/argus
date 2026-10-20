@@ -118,7 +118,7 @@ pub async fn ocr(
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.ocr().await?;
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let results = pool.run(move |e| e.predict(&image)).await?;
@@ -133,6 +133,7 @@ pub async fn ocr(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": permit.queue_ms,
             "model": model,
             "pipeline": pipeline,
             "regions": dtos,
@@ -156,7 +157,7 @@ pub async fn license_plate(
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.license_plate().await?;
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     const SLICE_AUTO_THRESHOLD: usize = 1280;
@@ -176,6 +177,7 @@ pub async fn license_plate(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": permit.queue_ms,
             "model": model,
             "pipeline": pipeline,
             "plates": dtos,
@@ -195,7 +197,7 @@ pub async fn qr(
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.qr().await?;
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let results = pool.run(move |e| e.detect(&image)).await?;
@@ -209,6 +211,7 @@ pub async fn qr(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": permit.queue_ms,
             "model": model,
             "pipeline": pipeline,
             "detections": dtos,

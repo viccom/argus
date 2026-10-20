@@ -127,7 +127,7 @@ pub async fn classify(
 
     let pool = state.engines.classification().await?;
 
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let results = pool.run(move |e| e.predict_top_k(&image, top_k)).await?;
@@ -142,6 +142,7 @@ pub async fn classify(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": permit.queue_ms,
             "model": model,
             "pipeline": pipeline,
             "predictions": dtos,

@@ -97,7 +97,7 @@ pub async fn segmentation(
     let image = decode_image(file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.segmentation().await?;
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let results = pool.run(move |e| e.predict(&image)).await?;
@@ -111,6 +111,7 @@ pub async fn segmentation(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "queue_ms": permit.queue_ms,
             "model": model,
             "pipeline": pipeline,
             "segments": dtos,

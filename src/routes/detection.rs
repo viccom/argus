@@ -201,7 +201,7 @@ pub(crate) async fn run_detect(
 
     let pool = cap.pool(&state).await?;
 
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let (detections, num_slices) = if params.sahi {
@@ -248,6 +248,7 @@ pub(crate) async fn run_detect(
     if let Some(n) = num_slices {
         data["sahi_slices"] = json!(n);
     }
+    data["queue_ms"] = json!(permit.queue_ms);
     let (model, pipeline) = state.engines.provenance(cap.key()).await;
     data["model"] = model;
     data["pipeline"] = pipeline;
@@ -273,7 +274,7 @@ pub async fn detect_obb(
 
     let pool = state.engines.obb().await?;
 
-    let _permit = acquire_permit(&state).await?;
+    let permit = acquire_permit(&state).await?;
 
     let t0 = std::time::Instant::now();
     let results = pool.run(move |e| e.predict(&image)).await?;
@@ -283,11 +284,15 @@ pub async fn detect_obb(
     let count = dtos.len();
     tracing::info!(endpoint = "detect_obb", count, inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("obb").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
             "detections": dtos,
             "count": count,
+            "queue_ms": permit.queue_ms,
+            "model": model,
+            "pipeline": pipeline,
             "inference_ms": elapsed,
         }
     })))
