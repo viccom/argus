@@ -41,6 +41,55 @@ const _: () = assert!(
     "DETECTION_CONFIDENCE_FLOOR 必须 >= SahiConfig::LOW_MODEL_CONFIDENCE"
 );
 
+// ---- A4 溯源：管线标识表 ----
+
+/// 每能力管线标识（`data.pipeline`）。内容语义：模型家族 + 关键预处理/输出形态。
+/// 契约是"换模型或预处理语义变化时必改串"，供消费方（homepix）做向量失效判定；
+/// 文件级失效用 `data.model`（文件名#sha256 前 12 位）。人脸识别/OCR/车牌的串
+/// 已含其前置检测模型（端点响应与 /models 报同一串，避免两处对照不一致）。
+pub const PIPELINE_TABLE: &[(&str, &str)] = &[
+    ("detection", "yolov8-det640-letterbox-v1"),
+    ("ppe", "yolov8-ppe10cls-det640-letterbox-v1"),
+    ("fire_smoke", "yolov8-firesmoke2cls-det640-letterbox-v1"),
+    ("classification", "yolov8-cls224-softmax-v1"),
+    ("obb", "yolov8-obb640-v1"),
+    ("segmentation", "yolov8-seg640-mask-proto-v1"),
+    ("face_detection", "yunet-det5pt-v1"),
+    ("face_recognition", "yunet+sface112-align5-emb128-v1"),
+    ("reid", "osnet-256x128-emb512-v1"),
+    ("ocr", "ppocrv5-det960+rec-chn-v1"),
+    ("license_plate", "mnet-det+lprnet-rec-v1"),
+    ("qr", "wechatqr-ssd-det416-v1"),
+    ("pose", "yolov8-pose17-coco-v1"),
+    ("depth", "depth-anything-v2-small-v1"),
+    ("human_parsing", "segformer-b2-atr18-v1"),
+];
+
+/// 能力键 → 管线标识。未知能力返回空串（调用方以空串为"无溯源"信号）。
+pub fn pipeline_for(capability: &str) -> &'static str {
+    PIPELINE_TABLE
+        .iter()
+        .find(|(cap, _)| *cap == capability)
+        .map(|(_, p)| *p)
+        .unwrap_or("")
+}
+
+/// 溯源信息：`model` 为"文件名#sha256 前 12 位"（多模型端点用 + 拼接）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelInfo {
+    pub model: String,
+    pub pipeline: &'static str,
+}
+
+/// 计算模型文件的 sha256 前 12 位（hex）。文件不存在返回 None。
+fn sha256_prefix_12(path: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    let digest = Sha256::digest(&bytes);
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Some(hex[..12].to_string())
+}
+
 /// 深检结果:单个引擎的健康状态。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineHealth {
@@ -106,6 +155,8 @@ pub struct EngineManager {
     pose: tokio::sync::OnceCell<Arc<EnginePool<DynPose>>>,
     depth: tokio::sync::OnceCell<Arc<EnginePool<DynDepth>>>,
     human_parsing: tokio::sync::OnceCell<Arc<EnginePool<HumanParsingEngine>>>,
+    /// A4 溯源缓存：能力键 → ModelInfo（model 串含文件 hash，首查后缓存）。
+    model_registry: std::sync::RwLock<std::collections::HashMap<String, ModelInfo>>,
 }
 
 impl EngineManager {
@@ -129,6 +180,56 @@ impl EngineManager {
             pose: tokio::sync::OnceCell::new(),
             depth: tokio::sync::OnceCell::new(),
             human_parsing: tokio::sync::OnceCell::new(),
+            model_registry: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    // ---- A4 溯源 ----
+
+    /// 能力溯源：`model` = 文件名#sha256 前 12 位（多模型能力用 + 拼接），
+    /// `pipeline` = 管线标识（PIPELINE_TABLE）。
+    ///
+    /// 首次调用时读文件计算 hash（spawn_blocking，百 MB 级 ~0.3s 一次性成本），
+    /// 之后走缓存。能力未配置（或多模型能力只配一半）返回 None。
+    pub async fn model_info(&self, capability: &str) -> Option<ModelInfo> {
+        if let Some(hit) = self.model_registry.read().unwrap_or_else(|e| e.into_inner()).get(capability) {
+            return Some(hit.clone());
+        }
+        let paths = self.config.model_paths_for(capability);
+        let pipeline = pipeline_for(capability);
+        if paths.is_empty() || pipeline.is_empty() {
+            return None;
+        }
+        let parts = tokio::task::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|p| {
+                    let name = p.file_name()?.to_string_lossy().to_string();
+                    let hash = sha256_prefix_12(p)?;
+                    Some(format!("{name}#{hash}"))
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .await
+        .ok()
+        .flatten()?;
+        let info = ModelInfo {
+            model: parts.join("+"),
+            pipeline,
+        };
+        self.model_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(capability.to_string(), info.clone());
+        Some(info)
+    }
+
+    /// 溯源 JSON 字段对（data.model / data.pipeline），供推理响应注入。
+    /// 未配置能力为 null——消费方以非空 model 串作为结果/向量的失效键。
+    pub async fn provenance(&self, capability: &str) -> (serde_json::Value, serde_json::Value) {
+        match self.model_info(capability).await {
+            Some(m) => (serde_json::json!(m.model), serde_json::json!(m.pipeline)),
+            None => (serde_json::Value::Null, serde_json::Value::Null),
         }
     }
 
@@ -957,5 +1058,79 @@ mod tests {
             matches!(err, AppError::ModelNotConfigured(_)),
             "实际: {err:?}"
         );
+    }
+
+    // ---- A4 溯源单测 ----
+
+    #[test]
+    fn pipeline_table_should_cover_all_capabilities_distinctly() {
+        // 码表性质：每能力一条非空 pipeline，且互不相同（撞串 = 失效判定失真）
+        let mut seen = std::collections::HashSet::new();
+        for cap in crate::config::CAPABILITY_KEYS {
+            let p = pipeline_for(cap);
+            assert!(!p.is_empty(), "{cap} 缺 pipeline");
+            assert!(seen.insert(p), "{cap} 的 pipeline 与其他能力撞串: {p}");
+        }
+    }
+
+    #[tokio::test]
+    async fn model_info_should_be_none_when_capability_unconfigured() {
+        let mgr = EngineManager::new(crate::config::Config::default());
+        assert!(mgr.model_info("detection").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn model_info_should_report_filename_and_sha_prefix() {
+        // 已知内容（b"hello"）的 sha256 = 2cf24dba5fb0a30e...，前 12 位固定
+        let dir = std::env::temp_dir().join("argus-test-provenance");
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("fake_model.onnx");
+        std::fs::write(&model, b"hello").unwrap();
+        let config = crate::config::Config {
+            detection_model: Some(model.clone()),
+            ..Default::default()
+        };
+        let mgr = EngineManager::new(config);
+        let mi = mgr.model_info("detection").await.expect("已配置应可解析");
+        assert!(mi.model.starts_with("fake_model.onnx#"), "实际: {}", mi.model);
+        assert!(mi.model.ends_with("2cf24dba5fb0"), "sha256 前 12 位不符: {}", mi.model);
+        assert!(mi.model.len() == "fake_model.onnx#".len() + 12);
+
+        // 二次调用走缓存（同值）
+        let mi2 = mgr.model_info("detection").await.unwrap();
+        assert_eq!(mi.model, mi2.model);
+    }
+
+    #[tokio::test]
+    async fn model_info_for_ocr_should_join_det_and_rec() {
+        let dir = std::env::temp_dir().join("argus-test-provenance2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let det = dir.join("ppocrv5_det.onnx");
+        let rec = dir.join("ppocrv5_rec.onnx");
+        std::fs::write(&det, b"det-bytes").unwrap();
+        std::fs::write(&rec, b"rec-bytes").unwrap();
+        let config = crate::config::Config {
+            ocr_det_model: Some(det),
+            ocr_rec_model: Some(rec),
+            ..Default::default()
+        };
+        let mgr = EngineManager::new(config);
+        let mi = mgr.model_info("ocr").await.expect("双模型都配置才可解析");
+        assert_eq!(mi.model.matches('#').count(), 2, "OCR 双模型应拼接: {}", mi.model);
+        assert!(mi.model.contains("ppocrv5_det.onnx") && mi.model.contains("ppocrv5_rec.onnx"));
+    }
+
+    #[tokio::test]
+    async fn model_info_for_ocr_should_be_none_when_only_half_configured() {
+        let dir = std::env::temp_dir().join("argus-test-provenance3");
+        std::fs::create_dir_all(&dir).unwrap();
+        let det = dir.join("only_det.onnx");
+        std::fs::write(&det, b"x").unwrap();
+        let config = crate::config::Config {
+            ocr_det_model: Some(det),
+            ..Default::default()
+        };
+        let mgr = EngineManager::new(config);
+        assert!(mgr.model_info("ocr").await.is_none(), "缺 rec 模型不应报告半套溯源");
     }
 }

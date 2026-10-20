@@ -97,9 +97,12 @@ pub async fn detect_batch(
         "批量检测完成"
     );
 
+    let (model, pipeline) = state.engines.provenance("detection").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "results": results,
             "total": total,
             "succeeded": total - failed,

@@ -256,6 +256,8 @@ pub async fn quality(
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": null,
+            "pipeline": "iqa-algo-v1",
             "quality": dto,
             "inference_ms": elapsed,
         }
@@ -281,9 +283,12 @@ pub async fn pose(
     let count = dtos.len();
     tracing::info!(endpoint = "pose", count, inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("pose").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "poses": dtos,
             "count": count,
             "inference_ms": elapsed,
@@ -309,9 +314,12 @@ pub async fn depth(
     let dto = DepthDto::from(&mask);
     tracing::info!(endpoint = "depth", inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("depth").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "depth": dto,
             "inference_ms": elapsed,
         }
@@ -336,9 +344,12 @@ pub async fn human_parsing(
     let dto = HumanParsingDto::from(&map);
     tracing::info!(endpoint = "human_parsing", inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("human_parsing").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "parsing": dto,
             "inference_ms": elapsed,
         }

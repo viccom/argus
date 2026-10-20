@@ -176,6 +176,15 @@ impl DetectCap {
             Self::FireSmoke => state.engines.fire_smoke().await,
         }
     }
+
+    /// 能力键（A4 溯源与 /models 一致）。
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Detection => "detection",
+            Self::Ppe => "ppe",
+            Self::FireSmoke => "fire_smoke",
+        }
+    }
 }
 
 /// 检测族共享实现:参数校验先于图像解码与引擎加载,非法参数不消耗推理资源。
@@ -239,6 +248,9 @@ pub(crate) async fn run_detect(
     if let Some(n) = num_slices {
         data["sahi_slices"] = json!(n);
     }
+    let (model, pipeline) = state.engines.provenance(cap.key()).await;
+    data["model"] = model;
+    data["pipeline"] = pipeline;
 
     Ok(Json(json!({ "status": "ok", "data": data })))
 }

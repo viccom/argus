@@ -129,9 +129,12 @@ pub async fn ocr(
     let full_text: Vec<&str> = dtos.iter().map(|d| d.text.as_str()).collect();
     tracing::info!(endpoint = "ocr", count, inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("ocr").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "regions": dtos,
             "count": count,
             "text": full_text.join("\n"),
@@ -169,9 +172,12 @@ pub async fn license_plate(
     let count = dtos.len();
     tracing::info!(endpoint = "license_plate", count, sliced, inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("license_plate").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "plates": dtos,
             "count": count,
             "sliced": sliced,
@@ -199,9 +205,12 @@ pub async fn qr(
     let count = dtos.len();
     tracing::info!(endpoint = "qr", count, inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("qr").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "detections": dtos,
             "count": count,
             "inference_ms": elapsed,

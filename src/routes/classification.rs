@@ -138,9 +138,12 @@ pub async fn classify(
     let count = dtos.len();
     tracing::info!(endpoint = "classify", count, top_k, inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("classification").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "predictions": dtos,
             "count": count,
             "inference_ms": elapsed,

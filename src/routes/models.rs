@@ -189,7 +189,17 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
 /// 检测的模型名清单。
 pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
     let loaded = state.engines.list_loaded();
-    let caps = capability_models(&state.config, &loaded);
+    let mut caps = capability_models(&state.config, &loaded);
+    // A4：每能力附 pipeline 标识（与推理响应的 data.pipeline 同串），
+    // 消费方可预先比对——换模型后哪些结果需要失效。
+    for (name, cap_value) in caps.iter_mut() {
+        if let serde_json::Value::Object(map) = cap_value {
+            let pipeline = crate::engine::pipeline_for(name);
+            if !pipeline.is_empty() {
+                map.insert("pipeline".into(), serde_json::json!(pipeline));
+            }
+        }
+    }
     Json(json!({ "status": "success", "data": { "capabilities": caps } }))
 }
 
@@ -398,5 +408,28 @@ mod tests {
         )
         .to_string();
         assert!(text.contains("缺少"), "缺少 key 应被拒: {text}");
+    }
+
+    #[tokio::test]
+    async fn models_should_report_pipeline_per_capability() {
+        // A4：/models 的 pipeline 与推理响应 data.pipeline 同串，消费方预检失效用
+        let config = Config {
+            detection_model: Some(std::path::PathBuf::from("/models/yolov8n.onnx")),
+            ..Default::default()
+        };
+        let mgr = EngineManager::new(config.clone());
+        let app = crate::routes::health::build_router(AppState::new(config, mgr), None);
+        let resp = app
+            .oneshot(Request::get("/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            text.contains("\"pipeline\":\"yolov8-det640-letterbox-v1\""),
+            "detection 应带 pipeline: {text}"
+        );
     }
 }

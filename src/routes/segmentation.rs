@@ -107,9 +107,12 @@ pub async fn segmentation(
     let count = dtos.len();
     tracing::info!(endpoint = "segmentation", count, inference_ms = elapsed as u64, "推理完成");
 
+    let (model, pipeline) = state.engines.provenance("segmentation").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": pipeline,
             "segments": dtos,
             "count": count,
             "inference_ms": elapsed,

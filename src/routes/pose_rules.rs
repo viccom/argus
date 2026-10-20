@@ -165,9 +165,12 @@ pub async fn pose_rules(
         "推理+规则完成"
     );
 
+    let (model, _pipeline) = state.engines.provenance("pose").await;
     Ok(Json(json!({
         "status": "ok",
         "data": {
+            "model": model,
+            "pipeline": "yolov8-pose17-coco-rules-v1",
             "poses": dtos,
             "count": count,
             "events": events_total,

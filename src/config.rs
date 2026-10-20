@@ -260,6 +260,37 @@ impl Config {
 
     /// 列出已配置模型路径的引擎能力名（deep health 与启动日志用）。
     /// 命名与 `EngineManager::list_loaded` 一致，便于对照"配置了未加载"状态。
+    /// 能力键 → 模型文件路径列表（A4 溯源用）。单模型能力 1 项；OCR/车牌 2 项；
+    /// 未配置返回空。与 EngineManager 各 loader 读取的 env 一一对应。
+    pub fn model_paths_for(&self, capability: &str) -> Vec<std::path::PathBuf> {
+        let one = |m: &Option<PathBuf>| m.clone().map(|p| vec![p]).unwrap_or_default();
+        match capability {
+            "detection" => one(&self.detection_model),
+            "ppe" => one(&self.ppe_model),
+            "fire_smoke" => one(&self.fire_smoke_model),
+            "classification" => one(&self.classification_model),
+            "obb" => one(&self.obb_model),
+            "segmentation" => one(&self.segmentation_model),
+            "face_detection" => one(&self.face_det_model),
+            "face_recognition" => one(&self.face_rec_model),
+            "reid" => one(&self.reid_model),
+            // 多模型能力要求配置完整：半套模型报半套溯源会误导向量失效判定
+            "ocr" => match (&self.ocr_det_model, &self.ocr_rec_model) {
+                (Some(d), Some(r)) => vec![d.clone(), r.clone()],
+                _ => Vec::new(),
+            },
+            "license_plate" => match (&self.plate_det_model, &self.plate_rec_model) {
+                (Some(d), Some(r)) => vec![d.clone(), r.clone()],
+                _ => Vec::new(),
+            },
+            "qr" => one(&self.qr_model),
+            "pose" => one(&self.pose_model),
+            "depth" => one(&self.depth_model),
+            "human_parsing" => one(&self.human_parsing_model),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn configured_engines(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
         if self.detection_model.is_some() { v.push("detection"); }
