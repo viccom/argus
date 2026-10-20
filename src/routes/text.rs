@@ -115,7 +115,7 @@ pub async fn ocr(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.ocr().await?;
     let _permit = acquire_permit(&state).await?;
@@ -150,7 +150,7 @@ pub async fn license_plate(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.license_plate().await?;
     let _permit = acquire_permit(&state).await?;
@@ -186,7 +186,7 @@ pub async fn qr(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.qr().await?;
     let _permit = acquire_permit(&state).await?;

@@ -186,7 +186,7 @@ pub async fn face_detect(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_face_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.face_detection().await?;
     let _permit = acquire_permit(&state).await?;
@@ -218,7 +218,7 @@ pub async fn face_recognize(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_recognize_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let det_pool = state.engines.face_detection().await?;
     let rec_pool = state.engines.face_recognition().await?;

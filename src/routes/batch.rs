@@ -119,7 +119,7 @@ async fn detect_one(
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| AppError::BadRequest(format!("读取 {path} 失败: {e}")))?;
-    let image = decode_image(bytes).await?;
+    let image = decode_image(bytes, state.config.max_image_pixels).await?;
     let (img_w, img_h) = (image.width(), image.height());
     let _permit = acquire_permit(state).await?;
     let t0 = std::time::Instant::now();

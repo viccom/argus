@@ -238,11 +238,11 @@ async fn parse_file_multipart(mut multipart: Multipart) -> Result<FileParams, Ap
 
 /// POST /quality — 图像质量评估（纯算法，不依赖模型文件）。
 pub async fn quality(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     // QualityAssessor 为纯算法评估器，不加载 ONNX 模型；CPU 密集但轻量，
     // 仍走 spawn_blocking 避免阻塞 runtime。
@@ -268,7 +268,7 @@ pub async fn pose(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.pose().await?;
     let _permit = acquire_permit(&state).await?;
@@ -297,7 +297,7 @@ pub async fn depth(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.depth().await?;
     let _permit = acquire_permit(&state).await?;
@@ -324,7 +324,7 @@ pub async fn human_parsing(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.human_parsing().await?;
     let _permit = acquire_permit(&state).await?;

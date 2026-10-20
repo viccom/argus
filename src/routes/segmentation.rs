@@ -94,7 +94,7 @@ pub async fn segmentation(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let file = parse_file_multipart(multipart).await?;
-    let image = decode_image(file).await?;
+    let image = decode_image(file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.segmentation().await?;
     let _permit = acquire_permit(&state).await?;

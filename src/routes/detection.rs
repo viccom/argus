@@ -187,7 +187,7 @@ pub(crate) async fn run_detect(
 ) -> Result<Json<Value>, AppError> {
     let params = parse_detect_multipart(multipart).await?;
     let filter = DetectFilter::new(params.confidence, params.target_classes, params.roi)?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
     let (img_w, img_h) = (image.width(), image.height());
 
     let pool = cap.pool(&state).await?;
@@ -257,7 +257,7 @@ pub async fn detect_obb(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_detect_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.obb().await?;
 

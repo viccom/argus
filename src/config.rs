@@ -19,6 +19,10 @@ pub struct Config {
     pub device: String,
     pub auth_token: Option<String>,
     pub max_body_mb: usize,
+    /// 解码前像素总数闸门（`ARGUS_MAX_IMAGE_PIXELS`，decoder.dimensions() 预检，
+    /// 在像素缓冲分配之前拒绝）。防解码炸弹：20MB 以内的 PNG 可达上亿像素，
+    /// 解码成 GB 级 RGBA。0 = 不限（默认，复现既有行为；部署按需设，如 6000 万）。
+    pub max_image_pixels: u64,
     pub max_concurrent_inference: usize,
     /// 每个引擎的实例池大小(同模型多实例并行推理)。默认 1 = 单实例串行,行为与池化前一致。
     /// 注意:对全部已加载引擎生效——内存代价为 模型大小 × 池大小 × 已加载引擎数,
@@ -96,6 +100,7 @@ impl Default for Config {
             device: "cpu".to_string(),
             auth_token: None,
             max_body_mb: 20,
+            max_image_pixels: 0,
             max_concurrent_inference: 0,
             engine_pool: 1,
             shutdown_timeout_secs: 10,
@@ -149,6 +154,11 @@ impl Config {
         if let Ok(v) = env::var("ARGUS_MAX_BODY_MB") {
             if let Ok(n) = v.parse() {
                 cfg.max_body_mb = n;
+            }
+        }
+        if let Ok(v) = env::var("ARGUS_MAX_IMAGE_PIXELS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.max_image_pixels = n;
             }
         }
         if let Ok(v) = env::var("ARGUS_MAX_CONCURRENT_INFERENCE") {
@@ -318,6 +328,25 @@ mod tests {
         assert_eq!(config.shutdown_timeout_secs, 30);
         unsafe {
             env::remove_var("ARGUS_SHUTDOWN_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    fn default_max_image_pixels_should_be_unlimited() {
+        // 默认 0 = 不限：像素闸是新增防线，不能改变既有合法大图的行为
+        assert_eq!(Config::default().max_image_pixels, 0);
+    }
+
+    #[test]
+    fn from_env_should_override_max_image_pixels() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_MAX_IMAGE_PIXELS", "60000000");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.max_image_pixels, 60_000_000);
+        unsafe {
+            env::remove_var("ARGUS_MAX_IMAGE_PIXELS");
         }
     }
 

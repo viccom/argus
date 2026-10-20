@@ -85,7 +85,7 @@ pub async fn classify(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_classify_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
     let top_k = params.top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K);
 
     let pool = state.engines.classification().await?;

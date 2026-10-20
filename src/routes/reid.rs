@@ -107,7 +107,7 @@ pub async fn reid_embed(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_reid_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let rects = match &params.boxes {
         Some(boxes) if !boxes.is_empty() => {

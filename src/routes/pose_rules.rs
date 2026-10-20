@@ -141,7 +141,7 @@ pub async fn pose_rules(
     multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     let params = parse_file_multipart(multipart).await?;
-    let image = decode_image(params.file).await?;
+    let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
     let pool = state.engines.pose().await?;
     let _permit = acquire_permit(&state).await?;
