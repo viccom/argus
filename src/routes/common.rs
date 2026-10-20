@@ -10,12 +10,27 @@ use rust_onnx_infer::Image;
 use crate::error::AppError;
 use crate::routes::health::AppState;
 
+/// multipart 流错误分类：body 超限与解析错误必须可区分。
+///
+/// axum 的 `DefaultBodyLimit` 超限在 multipart 流上表现为 413（LengthLimitError），
+/// 其余为 400。曾一律映射为"解析失败"，客户端无法判别该缩图还是该修格式。
+pub(crate) fn map_field_err(
+    e: axum::extract::multipart::MultipartError,
+    context: &str,
+) -> AppError {
+    if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        AppError::TooLarge(format!("请求体超过上限（请缩图或调大 ARGUS_MAX_BODY_MB）: {e}"))
+    } else {
+        AppError::BadRequest(format!("{context}: {e}"))
+    }
+}
+
 /// 读取单个 multipart 文本字段。
 pub(crate) async fn field_text(field: axum::extract::multipart::Field<'_>) -> Result<String, AppError> {
     let bytes = field
         .bytes()
         .await
-        .map_err(|e| AppError::BadRequest(format!("读取字段失败: {e}")))?;
+        .map_err(|e| map_field_err(e, "读取字段失败"))?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 

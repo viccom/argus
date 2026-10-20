@@ -28,6 +28,33 @@ pub enum AppError {
 
     #[error("推理过载: {0}")]
     Overload(String),
+
+    /// 请求体或图像内容超过上限（body 字节数 / 像素总数）。
+    /// axum 的 DefaultBodyLimit 超限在 multipart 错误里报告为 413，可与之区分。
+    #[error("内容过大: {0}")]
+    TooLarge(String),
+}
+
+impl AppError {
+    /// 机器可读错误码。消费方按 `data.code` 做重试分类，不解析 error 原文。
+    pub fn code(&self) -> &'static str {
+        match self {
+            AppError::BadRequest(_) => "bad_request",
+            AppError::ModelNotConfigured(_) => "model_not_configured",
+            AppError::CapabilityDisabled(_) => "capability_disabled",
+            AppError::Inference(_) => "inference_failed",
+            AppError::Image(_) => "unsupported_image",
+            AppError::Internal(_) => "internal",
+            AppError::Overload(_) => "overload",
+            AppError::TooLarge(_) => "too_large",
+        }
+    }
+
+    /// 客户端可否安全重试。过载（背压拒绝/排队超时）是唯一预期内可重试项；
+    /// 超限重发同样的请求体必然再超限（应缩图或调 ARGUS_MAX_BODY_MB）。
+    pub fn retryable(&self) -> bool {
+        matches!(self, AppError::Overload(_))
+    }
 }
 
 impl IntoResponse for AppError {
@@ -36,7 +63,7 @@ impl IntoResponse for AppError {
         // 因此必须在响应构造处主动落日志，否则生产环境无失败痕迹可查。
         match &self {
             // 客户端输入问题：量可能大且非服务故障，降为 debug 不刷屏
-            AppError::BadRequest(_) => tracing::debug!("{}", self.to_string()),
+            AppError::BadRequest(_) | AppError::TooLarge(_) => tracing::debug!("{}", self.to_string()),
             // 背压拒绝属预期内的过载信号
             AppError::Overload(_) => tracing::warn!("请求被背压拒绝: {}", self.to_string()),
             // 服务侧故障（模型未配置/推理失败/图像异常/内部错误）必须留痕
@@ -44,7 +71,11 @@ impl IntoResponse for AppError {
         }
         let body = json!({
             "status": "error",
-            "data": { "error": self.to_string() }
+            "data": {
+                "error": self.to_string(),
+                "code": self.code(),
+                "retryable": self.retryable(),
+            }
         });
         (StatusCode::OK, axum::Json(body)).into_response()
     }
@@ -74,6 +105,52 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "error");
         assert!(json["data"]["error"].as_str().unwrap().contains("missing file"));
+    }
+
+    #[tokio::test]
+    async fn error_envelope_should_carry_machine_readable_code() {
+        // 消费方(homepix client.go)按 data.code 分类重试策略,不猜 error 原文
+        let resp = AppError::BadRequest("x".into()).into_response();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["code"], "bad_request");
+        assert_eq!(json["data"]["retryable"], false);
+    }
+
+    #[tokio::test]
+    async fn overload_should_be_the_only_retryable_code() {
+        let resp = AppError::Overload("busy".into()).into_response();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["code"], "overload");
+        assert_eq!(json["data"]["retryable"], true);
+    }
+
+    #[test]
+    fn every_variant_should_have_distinct_stable_code() {
+        // 码表是对外契约:两变体撞码或改码都会打断消费方的重试分类
+        let samples = [
+            AppError::BadRequest("".into()),
+            AppError::ModelNotConfigured("".into()),
+            AppError::CapabilityDisabled("".into()),
+            AppError::Inference("".into()),
+            AppError::Image("".into()),
+            AppError::Internal("".into()),
+            AppError::Overload("".into()),
+            AppError::TooLarge("".into()),
+        ];
+        let mut codes: Vec<&str> = samples.iter().map(|e| e.code()).collect();
+        let dedup: std::collections::HashSet<&str> = codes.drain(..).collect();
+        assert_eq!(dedup.len(), samples.len(), "错误码必须互不相同");
+        assert!(!samples.iter().any(|e| e.code().is_empty()));
+    }
+
+    #[test]
+    fn too_large_should_not_be_retryable() {
+        // 超限重试同一请求体必然再超限:客户端要缩图或调上限,不是重试
+        let err = AppError::TooLarge("body".into());
+        assert_eq!(err.code(), "too_large");
+        assert!(!err.retryable());
     }
 
     #[test]

@@ -185,7 +185,7 @@ async fn parse_file_multipart(mut multipart: Multipart) -> Result<FileParams, Ap
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(format!("multipart 解析失败: {e}")))?
+        .map_err(|e| crate::routes::common::map_field_err(e, "multipart 解析失败"))?
     {
         match field.name() {
             Some("file") => {

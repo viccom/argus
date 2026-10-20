@@ -81,7 +81,7 @@ async fn parse_face_multipart(mut multipart: Multipart) -> Result<FaceDetectPara
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(format!("multipart 解析失败: {e}")))?
+        .map_err(|e| crate::routes::common::map_field_err(e, "multipart 解析失败"))?
     {
         let name = field.name().unwrap_or_default().to_string();
         if name == "file" {
@@ -89,7 +89,7 @@ async fn parse_face_multipart(mut multipart: Multipart) -> Result<FaceDetectPara
                 field
                     .bytes()
                     .await
-                    .map_err(|e| AppError::BadRequest(format!("读取文件失败: {e}")))?
+                    .map_err(|e| crate::routes::common::map_field_err(e, "读取文件失败"))?
                     .to_vec(),
             );
         } else {
@@ -118,7 +118,7 @@ async fn parse_recognize_multipart(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(format!("multipart 解析失败: {e}")))?
+        .map_err(|e| crate::routes::common::map_field_err(e, "multipart 解析失败"))?
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
@@ -127,7 +127,7 @@ async fn parse_recognize_multipart(
                     field
                         .bytes()
                         .await
-                        .map_err(|e| AppError::BadRequest(format!("读取文件失败: {e}")))?
+                        .map_err(|e| crate::routes::common::map_field_err(e, "读取文件失败"))?
                         .to_vec(),
                 );
             }
@@ -365,6 +365,41 @@ mod tests {
             text.contains("未配置") || text.contains("model"),
             "应提示模型未配置: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_body_should_report_too_large_code() {
+        // body 超限曾被报成"读取文件失败: Error parsing multipart"（与坏文件不可区分）；
+        // axum 对 DefaultBodyLimit 超限报 413，据此映射独立的 too_large 错误码
+        let config = Config {
+            max_body_mb: 1,
+            ..Default::default()
+        };
+        let app = build_router(AppState::new(config.clone(), EngineManager::new(config)), None);
+
+        // 构造 >1MB 的 file 字段
+        let big = vec![b'a'; 1_100_000];
+        let boundary = "----testboundary";
+        let mut body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"big.jpg\"\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&big);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let resp = app
+            .oneshot(
+                Request::post("/face/detect")
+                    .header("content-type", "multipart/form-data; boundary=----testboundary")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let text = body_text(resp).await;
+        assert!(text.contains("\"code\":\"too_large\""), "应报 too_large: {text}");
+        assert!(text.contains("ARGUS_MAX_BODY_MB"), "应提示调整上限: {text}");
     }
 
     #[tokio::test]

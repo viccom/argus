@@ -96,7 +96,7 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(format!("multipart 解析失败: {e}")))?
+        .map_err(|e| crate::routes::common::map_field_err(e, "multipart 解析失败"))?
     {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
@@ -105,7 +105,7 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
                     field
                         .bytes()
                         .await
-                        .map_err(|e| AppError::BadRequest(format!("读取文件失败: {e}")))?
+                        .map_err(|e| crate::routes::common::map_field_err(e, "读取文件失败"))?
                         .to_vec(),
                 );
             }
