@@ -54,14 +54,21 @@ cargo build --release --jobs 6
 
 运行时需 ORT 动态库（`load-dynamic`）与模型文件，环境变量见下。
 
-版本标识由 build.rs 编译期探测注入（git hash + dirty 标记），见 `/health` 的 `version` 字段。
+版本标识由 build.rs 编译期探测注入（git hash + dirty 标记），见 `/health` 的 `version` 字段。build.rs 监听 git 目录的 `HEAD` + `refs/`：新提交后直接 `cargo build` 即更新版本串，无需手动 touch。
 `SIGTERM`/`Ctrl+C` 触发优雅停机：等待在途请求完成后退出（`ARGUS_SHUTDOWN_TIMEOUT_SECS` 超时保底强退，默认 10s）。
 
 ## 配置（环境变量）
 
+### 部署布局约定
+
+`argus.env` 里的 `ORT_DYLIB_PATH` / `ARGUS_MODELS_DIR` 用**相对路径**（`./lib/...`、`./models`），由 `run.sh` 切到自身所在目录后解析：
+
+- 发版只需替换 bundle 目录（二进制 + `run.sh` + `argus.env`，`models`/`lib` 用软链），**不改任何字面路径**；
+- 直连 `./argus` 启动时须保证 cwd 为 bundle 目录，否则相对路径失效。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ORT_DYLIB_PATH` | — | libonnxruntime.so 路径（必需） |
+| `ORT_DYLIB_PATH` | — | libonnxruntime.so 路径（必需；bundle 内为 `./lib/libonnxruntime.so.1.26.0`） |
 | `ARGUS_PORT` | 7042 | 监听端口 |
 | `ARGUS_DEVICE` | cpu | cpu / cuda |
 | `ARGUS_AUTH_TOKEN` | 无 | 设置后启用 API key（`X-API-Key` 或 `Authorization: Bearer`） |
