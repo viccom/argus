@@ -105,7 +105,8 @@ pub async fn service_info(
             "POST /classify": "图像分类（multipart: file/top_k?）",
             "POST /detect/obb": "OBB 旋转框检测（multipart: file）",
             "POST /face/detect": "人脸检测（multipart: file）",
-            "POST /face/recognize": "人脸识别（multipart: file/known_embeddings）",
+            "POST /face/recognize": "人脸识别（multipart: file/known_embeddings?/threshold?/min_face_px?/max_faces?）",
+            "POST /face/recognize/batch": "批量人脸识别（multipart: 多 file×≤16/共享参数），单图失败带 error 不炸整批",
             "POST /ocr": "OCR 文字识别（multipart: file）",
             "POST /license-plate": "车牌识别（multipart: file）",
             "POST /qr": "二维码识别（multipart: file）",
@@ -141,6 +142,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
         .route("/classify", post(crate::routes::classification::classify))
         .route("/face/detect", post(crate::routes::face::face_detect))
         .route("/face/recognize", post(crate::routes::face::face_recognize))
+        .route("/face/recognize/batch", post(crate::routes::face::face_recognize_batch))
         .route("/reid", post(crate::routes::reid::reid_embed))
         .route("/ocr", post(crate::routes::text::ocr))
         .route("/license-plate", post(crate::routes::text::license_plate))

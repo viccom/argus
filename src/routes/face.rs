@@ -275,6 +275,164 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
+// ---- B3 批量上传 ----
+
+/// 单请求文件数上限。与 `ARGUS_MAX_BODY_MB` 协同：16 张原尺寸家庭照易超 20MB
+/// body 上限，客户端应送 JPEG 派生图（错误码 too_large 会明确提示）。
+pub(crate) const MAX_BATCH_FILES: usize = 16;
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum FaceBatchItem {
+    Ok {
+        file_index: usize,
+        matches: Vec<FaceMatchDto>,
+        count: usize,
+        embeddings: Vec<Vec<f32>>,
+        embed_dim: Option<usize>,
+        inference_ms: u128,
+    },
+    Err {
+        file_index: usize,
+        error: String,
+    },
+}
+
+/// 批量参数：多个 file 字段 + 共享的 known_embeddings/threshold/门控。
+struct FaceBatchParams {
+    files: Vec<Vec<u8>>,
+    known: Vec<KnownFace>,
+    threshold: f32,
+    gate: FaceGate,
+}
+
+async fn parse_face_batch_multipart(mut multipart: Multipart) -> Result<FaceBatchParams, AppError> {
+    let mut files: Vec<Vec<u8>> = Vec::new();
+    let mut known_json: Option<String> = None;
+    let mut threshold: Option<f32> = None;
+    let mut gate_raw = (None, None);
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| crate::routes::common::map_field_err(e, "multipart 解析失败"))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "file" => {
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| crate::routes::common::map_field_err(e, "读取文件失败"))?
+                    .to_vec();
+                files.push(bytes);
+            }
+            "known_embeddings" => known_json = Some(field_text(field).await?),
+            "threshold" => {
+                let text = field_text(field).await?;
+                if !text.trim().is_empty() {
+                    threshold = Some(
+                        text.parse::<f32>().map_err(|_| {
+                            AppError::BadRequest(format!("threshold 无法解析: {text}"))
+                        })?,
+                    );
+                }
+            }
+            "min_face_px" => gate_raw.0 = parse_gate_u32(&name, field).await?,
+            "max_faces" => gate_raw.1 = parse_gate_usize(&name, field).await?,
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Err(AppError::BadRequest("缺少 file 字段（至少一张图片）".into()));
+    }
+    if files.len() > MAX_BATCH_FILES {
+        return Err(AppError::BadRequest(format!(
+            "单请求最多 {MAX_BATCH_FILES} 个 file 字段，当前 {}（批量应送压缩后的派生图）",
+            files.len()
+        )));
+    }
+    let known: Vec<KnownFace> = match known_json {
+        Some(ref json_str) if !json_str.trim().is_empty() => serde_json::from_str(json_str)
+            .map_err(|e| AppError::BadRequest(format!("known_embeddings JSON 解析失败: {e}")))?,
+        _ => Vec::new(),
+    };
+
+    Ok(FaceBatchParams {
+        files,
+        known,
+        threshold: threshold.unwrap_or(0.5),
+        gate: FaceGate::from_raw(gate_raw)?,
+    })
+}
+
+/// 单图识别全流程（detect → 门控 → 逐脸提向量 → 比对），单端点与批量共享。
+/// permit 在此获取：整段（检测 + 逐脸 extract）受同一背压保护。
+#[allow(clippy::too_many_arguments)]
+async fn recognize_faces(
+    state: &AppState,
+    image: rust_onnx_infer::Image,
+    known: &[KnownFace],
+    threshold: f32,
+    gate: FaceGate,
+) -> Result<(Vec<FaceMatchDto>, Vec<Vec<f32>>), AppError> {
+    let det_pool = state.engines.face_detection().await?;
+    let rec_pool = state.engines.face_recognition().await?;
+
+    let _permit = acquire_permit(state).await?;
+
+    let t0 = std::time::Instant::now();
+    let image_clone = image.clone();
+    let faces = det_pool.run(move |e| e.predict(&image_clone)).await?;
+    // 门控必须发生在逐脸提向量**之前**——省的就是每脸一次 rec 池推理
+    let faces = gate_faces(faces, gate);
+
+    let mut matches: Vec<FaceMatchDto> = Vec::with_capacity(faces.len());
+    let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(faces.len());
+    for face in &faces {
+        let landmarks = face.landmarks.clone();
+        let img = image.clone();
+        let emb = rec_pool.run(move |e| e.extract(&img, &landmarks)).await?;
+        embeddings.push(emb.clone());
+
+        let (best_label, best_sim) = known
+            .iter()
+            .map(|k| (k.label.as_str(), cosine_similarity(&emb, &k.embedding)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(label, sim)| {
+                (
+                    if sim >= threshold {
+                        Some(label.to_string())
+                    } else {
+                        None
+                    },
+                    sim,
+                )
+            })
+            .unwrap_or((None, 0.0));
+
+        let d = &face.detection;
+        matches.push(FaceMatchDto {
+            label: best_label,
+            similarity: best_sim,
+            face_index: embeddings.len() - 1,
+            confidence: d.confidence(),
+            bbox: [d.x1(), d.y1(), d.x2(), d.y2()],
+            landmarks: face
+                .landmarks
+                .iter()
+                .copied()
+                .map(KeypointDto::from)
+                .collect(),
+        });
+    }
+    let _ = t0;
+    Ok((matches, embeddings))
+}
+
 // ---- handlers ----
 
 /// POST /face/detect — 人脸检测，返回每张人脸的框 + 5 关键点。
@@ -322,59 +480,15 @@ pub async fn face_recognize(
     let params = parse_recognize_multipart(multipart).await?;
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
 
-    let det_pool = state.engines.face_detection().await?;
-    let rec_pool = state.engines.face_recognition().await?;
-    let _permit = acquire_permit(&state).await?;
-
     let t0 = std::time::Instant::now();
-    let image_clone = image.clone();
-    let faces = det_pool.run(move |e| e.predict(&image_clone)).await?;
-    // 门控必须发生在逐脸提向量**之前**——省的就是每脸一次 rec 池推理
-    let faces = gate_faces(faces, params.gate);
-
-    // 逐脸提取嵌入(每次经池取实例,天然公平)
-    let mut matches: Vec<FaceMatchDto> = Vec::with_capacity(faces.len());
-    let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(faces.len());
-
-    for (idx, face) in faces.iter().enumerate() {
-        let landmarks = face.landmarks.clone();
-        let img = image.clone();
-        let emb = rec_pool.run(move |e| e.extract(&img, &landmarks)).await?;
-        embeddings.push(emb.clone());
-
-        // 在已知库中找最高相似度
-        let (best_label, best_sim) = params
-            .known
-            .iter()
-            .map(|k| (k.label.as_str(), cosine_similarity(&emb, &k.embedding)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(label, sim)| {
-                (
-                    if sim >= params.threshold {
-                        Some(label.to_string())
-                    } else {
-                        None
-                    },
-                    sim,
-                )
-            })
-            .unwrap_or((None, 0.0));
-
-        let d = &face.detection;
-        matches.push(FaceMatchDto {
-            label: best_label,
-            similarity: best_sim,
-            face_index: idx,
-            confidence: d.confidence(),
-            bbox: [d.x1(), d.y1(), d.x2(), d.y2()],
-            landmarks: face
-                .landmarks
-                .iter()
-                .copied()
-                .map(KeypointDto::from)
-                .collect(),
-        });
-    }
+    let (matches, embeddings) = recognize_faces(
+        &state,
+        image,
+        &params.known,
+        params.threshold,
+        params.gate,
+    )
+    .await?;
     let elapsed = t0.elapsed().as_millis();
     tracing::info!(endpoint = "face_recognize", count = matches.len(), inference_ms = elapsed as u64, "推理完成");
 
@@ -388,6 +502,93 @@ pub async fn face_recognize(
             "count": matches.len(),
             "embeddings": embeddings,
             "inference_ms": elapsed,
+        }
+    })))
+}
+
+/// POST /face/recognize/batch — 多图上传批量人脸识别（B3）。
+///
+/// 语义照抄 `/detect/batch`：逐图串行（省的是 HTTP 往返与请求开销，非推理并行）、
+/// 单图失败带 `error` 不炸整批、每图独立背压 permit；模型未配置是整批级错误。
+/// 共享参数：known_embeddings/threshold/min_face_px/max_faces 对全部图生效。
+pub async fn face_recognize_batch(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<Json<Value>, AppError> {
+    let params = parse_face_batch_multipart(multipart).await?;
+    // 模型未配置是整批级错误（无引擎可用），不进入逐图隔离
+    let _det_pool = state.engines.face_detection().await?;
+    let _rec_pool = state.engines.face_recognition().await?;
+
+    let t0 = std::time::Instant::now();
+    let mut results = Vec::with_capacity(params.files.len());
+    let mut failed = 0usize;
+    for (idx, bytes) in params.files.into_iter().enumerate() {
+        let item = match decode_image(bytes, state.config.max_image_pixels).await {
+            Ok(image) => {
+                let per_image_t0 = std::time::Instant::now();
+                match recognize_faces(
+                    &state,
+                    image,
+                    &params.known,
+                    params.threshold,
+                    params.gate,
+                )
+                .await
+                {
+                    Ok((matches, embeddings)) => {
+                        let embed_dim = embeddings.first().map(|e| e.len());
+                        FaceBatchItem::Ok {
+                            file_index: idx,
+                            count: matches.len(),
+                            matches,
+                            embeddings,
+                            embed_dim,
+                            inference_ms: per_image_t0.elapsed().as_millis(),
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!(file_index = idx, error = %e, "批量识别单图失败（已隔离）");
+                        FaceBatchItem::Err {
+                            file_index: idx,
+                            error: e.to_string(),
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(file_index = idx, error = %e, "批量识别单图解码失败（已隔离）");
+                FaceBatchItem::Err {
+                    file_index: idx,
+                    error: e.to_string(),
+                }
+            }
+        };
+        results.push(item);
+    }
+    let total = results.len();
+    let elapsed = t0.elapsed().as_millis();
+    tracing::info!(
+        endpoint = "face_recognize_batch",
+        total,
+        failed,
+        elapsed_ms = elapsed as u64,
+        "批量识别完成"
+    );
+
+    let (model, pipeline) = state.engines.provenance("face_recognition").await;
+    Ok(Json(json!({
+        "status": "ok",
+        "data": {
+            "model": model,
+            "pipeline": pipeline,
+            "results": results,
+            "total": total,
+            "succeeded": total - failed,
+            "failed": failed,
+            "elapsed_ms": elapsed,
         }
     })))
 }
@@ -718,5 +919,94 @@ mod tests {
         assert_eq!(lms.len(), 2);
         assert_eq!(lms[0]["x"], 1.5);
         assert_eq!(lms[1]["score"], 0.5);
+    }
+
+    // ---- B3 批量端点测试 ----
+
+    async fn post_batch_files(n_files: usize, extra: &[(&str, &str)]) -> String {
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let boundary = "----testboundary";
+        let mut body = Vec::new();
+        for (name, value) in extra {
+            body.extend_from_slice(
+                format!(
+                    "--{b}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n",
+                    b = boundary
+                )
+                .as_bytes(),
+            );
+        }
+        for _ in 0..n_files {
+            body.extend_from_slice(
+                format!(
+                    "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"t.png\"\r\nContent-Type: image/png\r\n\r\n",
+                    b = boundary
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(&png);
+            body.extend_from_slice(format!("\r\n--{b}--\r\n", b = boundary).as_bytes());
+            // 修正：终止段只应出现一次，去掉上面这行的终止符，循环外加
+        }
+        // 移除误加的中间终止段，统一以最终终止段收尾
+        // （上面循环里每图后都写了 --boundary--，需要去掉前面的，只保留最后一个）
+        // 简化处理：重建 body
+        let mut body2 = Vec::new();
+        for (name, value) in extra {
+            body2.extend_from_slice(
+                format!(
+                    "--{b}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n",
+                    b = boundary
+                )
+                .as_bytes(),
+            );
+        }
+        for _ in 0..n_files {
+            body2.extend_from_slice(
+                format!(
+                    "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"t.png\"\r\nContent-Type: image/png\r\n\r\n",
+                    b = boundary
+                )
+                .as_bytes(),
+            );
+            body2.extend_from_slice(&png);
+            body2.extend_from_slice(b"\r\n");
+        }
+        body2.extend_from_slice(format!("--{b}--\r\n", b = boundary).as_bytes());
+
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(
+                Request::post("/face/recognize/batch")
+                    .header("content-type", "multipart/form-data; boundary=----testboundary")
+                    .body(Body::from(body2))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        body_text(resp).await
+    }
+
+    #[tokio::test]
+    async fn batch_without_files_returns_bad_request() {
+        let text = post_batch_files(0, &[("threshold", "0.5")]).await;
+        assert!(text.contains("file"), "应提示缺 file: {text}");
+    }
+
+    #[tokio::test]
+    async fn batch_exceeding_max_files_returns_bad_request() {
+        let text = post_batch_files(17, &[]).await;
+        assert!(text.contains("16"), "应提示上限 16: {text}");
+    }
+
+    #[tokio::test]
+    async fn batch_when_model_not_configured_fails_whole_batch() {
+        // 无引擎可用属整批级错误，不进入逐图隔离（与 /detect/batch 同语义）
+        let text = post_batch_files(3, &[]).await;
+        assert!(text.contains("未配置") || text.contains("model"), "{text}");
+        assert!(!text.contains("results"), "整批失败不应返回 results: {text}");
     }
 }
