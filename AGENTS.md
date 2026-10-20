@@ -13,6 +13,8 @@ cargo build --release --jobs 6        # 生产构建（LTO/strip）。运行需 
 
 E2E 冒烟需运行中的实例与真实模型；模型不入库（.gitignore 含 /models /testdata .env* /deploy/lib），来源与踩坑判别法见 README 模型表 + docs/e2e-and-models.md。
 
+部署走版本化 bundle（`argus-0.1.0-<sha>/`：二进制 + run.sh + argus.env，models/lib 用软链）。约定：run.sh 以自身所在目录为 cwd、env 内路径一律相对（`./lib` `./models`）、build.rs 监听 git refs（提交后直接构建版本串即更新）——发版只换 bundle 目录，不改任何字面路径。细节见 README「部署布局约定」。
+
 ## 架构地图
 
 | 位置 | 职责 |
