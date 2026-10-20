@@ -1,0 +1,67 @@
+# Argus × homepix 集成改进计划 · 任务跟踪表
+
+> 目的：把 Argus 从"工业安监服务"补齐成 homepix 家庭照片库的可靠视觉后端。
+> 依据：2026-10-20 ur5900（8 线程 / 15GB / 无 GPU）实机部署与真实家庭照片探针，
+> 数字与缺陷均为实测。原表由 homepix 侧 Coding Agent 成文，argus 侧逐条对照代码
+> 复核后采纳（复核记录见变更记录），本表是该批改进的唯一进度事实源。
+
+## 0. 全局约束（违反即返工）
+
+1. **向后兼容优先**。生产已有消费方（safebot-go，/ppe /fire-smoke 等）。
+   新增 multipart 字段一律可选，默认值复现改动前行为；新增响应字段可以，删改现有字段不行。
+2. **门禁沿用仓库口径**：`cargo test --jobs 6` 全绿 + `cargo clippy --all-targets` 零警告；TDD 先红后绿。
+3. 端点改动过 `engine-exposure-plan.md` 三道门的后两道（本批无新模型）。
+4. **契约变更同步 homepix**：homepix `internal/argus/client.go` 只看 `data.error`、不写死维度——加字段不打断它，改语义会。
+
+## 1. 可复现夹具（`/tmp/argus-test/`）
+
+| 文件 | 内容 | 改动前实测 |
+|---|---|---|
+| `orient_raw.jpg` | 4032×3024，EXIF orientation=6 | /face/detect → 2 脸 conf 0.72/0.64 |
+| `orient_baked.jpg` | 同一张摆正后 | 38 脸 conf 0.93 起；/face/recognize 38 向量 1475ms |
+| `family3.jpg` | 三人合影 | 3 脸；recognize 53ms |
+| `big15mp.jpg` | 海滩七人 | /detect 16 检出 |
+| `cake_tight.jpg` | 蛋糕裁剪 | /classify → count=0（top-1<0.5 清空） |
+
+相似度地真（homepix 逐张裁剪核对）：boy_id 为查询，同人 0.79/0.77/0.62，异人 0.47，其余 <0.42。B2 比选的参照。
+
+## 2. 批 A —— P0
+
+| ID | 任务 | 状态 | 验证证据 | 日期 |
+|---|---|---|---|---|
+| A1 | 解码时应用 EXIF Orientation（+C3 像素闸 `ARGUS_MAX_IMAGE_PIXELS` 顺同一 ImageReader 改造带入） | ✅ | `decode_image` 改走 ImageReader→into_decoder：orientation() 预读 + apply_orientation；像素闸在缓冲分配前经 dimensions() 预检。单测：8 取向对照（同 JPEG 字节基线规避有损差）+ 无 EXIF PNG 逐字节不变 + 像素闸边界/默认 0 不限 + config 解析。实现要点：NoTransforms 分支空操作=摄像头帧零开销；EXIF 损坏降级为无变换（debug 留痕）。C3 默认 0=不限（向后兼容），部署 env 设 6000 万 | 2026-10-20 |
+| A2 | /classify 阈值可调 | ✅ | 引擎构造期 `set_confidence_threshold(0.0)`（license_plate 先例，不动 fork）；路由层 `apply_top1_gate` 按请求阈值复现历史怪癖：top-1 过线返回**全量** top-k 含低分尾巴、不过则空（4 单测锁定"top-1 门控 ≠ 逐项过滤"）；`confidence` ∈[0.0,1.0] 越界 400 | 2026-10-20 |
+| A3 | 人脸门控 min_face_px/max_faces | ✅ | `gate_faces` 纯函数：短边过滤→置信度降序截前 N（稳定排序），默认全关零行为变更；detect 与 recognize 共用，recognize 的门控在逐脸 extract **之前**（成本就在每脸一次 rec 池推理）。6 门控单测（默认不重排/短边 80 边界含/截断/先滤后取） | 2026-10-20 |
+| A4 | 响应回报 model/pipeline | ✅ | `EngineManager::model_info`：文件名#sha256 前 12 位（首查 spawn_blocking 后缓存；OCR/车牌双模型 + 拼接，半套配置 None）；PIPELINE_TABLE 15 能力管线标识，人脸识别/OCR/车牌串含前置检测模型（与 /models 同串防两处对照不一致）；15 个推理 handler 注入 data.model/pipeline；/models 每能力附 pipeline。5 单测（表覆盖/未配置 None/已知 sha/双模型/半套 None） | 2026-10-20 |
+| A5 | 错误机器可读码（+C2 too_large 一并实现，避免枚举有码无源） | ✅ | AppError 增 code()/retryable()/TooLarge；信封 `data.code`+`data.retryable`，8 变体 8 码、仅 overload 可重试；body 超限经 axum MultipartError 413(LengthLimitError) 与解析错误区分（17 处映射集中 common::map_field_err），路由级测试 1MB 上限→too_large+提示 ARGUS_MAX_BODY_MB | 2026-10-20 |
+
+## 3. 批 B —— P1
+
+| ID | 任务 | 状态 | 验证证据 | 日期 |
+|---|---|---|---|---|
+| B1 | /face/recognize 补 landmarks + embed_dim | ✅ | FaceMatchDto.landmarks（5 点，与 /face/detect 同源同值）+ data.embed_dim；**crop=true 推迟到任务 32**（base64 图返回契约统一发明，避免两套形状）。DTO 单测 | 2026-10-20 |
+| B2 | ArcFace/MobileFaceNet 可切换 | ⬜（条件启动） | 启动条件：A3+B1 落地后 SFace 余量仍不足（地真同人 0.62-0.79/异人 0.47 分界窄，先按 0.58 阈值带跑）。上游 `with_norm_mode(InsightFace)` 已支持 512 维，argus 侧改工厂+`ARGUS_FACE_REC_MODE` 半小时；模型文件获取需批准；换模型=历史向量全废（A4 已为其铺好失效判定） | |
+| B3 | /face/recognize/batch | ✅ | 多 file ≤16/请求（超限 400 提示送派生图——与 20MB body 上限协同）；语义照抄 /detect/batch：逐图串行（**省 HTTP 往返非推理并行**，验收按此校准）、单图失败带 error 不炸整批、每图独立 permit、模型未配置=整批级错误；`recognize_faces` 共享函数消除单图/批量重复。3 路由测试 | 2026-10-20 |
+| B4 | 暴露 ORT intra 线程数 | ⬜（等数据） | 需动 fork（runtime_config 无线程全局 setter，只有 GPU 显存有）≈15 行 + push + cargo update；对冲：B5 计数先行，压测数据决定值不值得 | |
+| B5 | 过载可观测 | ✅ | InferencePermit RAII：in_flight 随 permit 存亡；acquire 打点 queued/rejected/acquire_timeout；全部推理响应加 queue_ms（与 inference_ms 分开）；/health 浅检增 backpressure 对象。4 单测（RAII 归零/fail-fast 只计 rejected/超时双计/浅检字段）。**C5 的 /metrics 是同一需求的 Prometheus 形态，后续在 B5 计数之上加文本暴露，别开两份** | 2026-10-20 |
+
+## 4. 批 C —— P2
+
+| ID | 任务 | 状态 | 备注 |
+|---|---|---|---|
+| C1 | /models status "success"→"ok" | ⏸ | safebot-go 不在 argus 侧机器，字面量依赖需用户侧确认；homepix 客户端已确认不读 |
+| C2 | 超限报对的错 | ✅ | 并入 A5 实现（见上） |
+| C3 | 像素闸门 | ✅ | 并入 A1 实现（见上） |
+| C4 | OpenAPI 契约文档 | ⬜ | README 表格已同步全部新字段；OpenAPI 全量文档插空做 |
+| C5 | /metrics | ⬜ | 见 B5 备注，基于其计数加 Prometheus 文本暴露 |
+| C6 | 不做 HEIC/AVIF | 🚫 | 明确不做：不引 libheif 破坏自包含单文件；homepix 送 JPEG 派生图 |
+
+## 5. 与既有计划的关系
+
+- 本表与 `engine-exposure-plan.md`（能力广度）互不阻塞：那份扩新端点，这份补既有端点的契约可靠度。
+- B1 的 crop=true 与该表任务 32（图像返回契约）合并执行。
+- B4 若启动，走 rust-onnx-infer fork 流程（AGENTS.md 依赖说明）。
+
+## 变更记录
+
+- 2026-10-20：**批 A 全部 + B1/B3/B5 完成并部署**（A5+C2/A1+C3/A2/A3/A4/B1/B3/B5 共 8 项，测试基线 174+1 → 209+1 全绿，clippy 零警告）。原表（homepix 侧成文）经 argus 侧复核后采纳的修正：①A2 无需改上游（set_confidence_threshold 公开，license_plate 先例）；②C2 并入 A5（枚举有码无源问题）；③C3 并入 A1（同一 ImageReader 改造）；④B1 砍掉 crop=true 提前量（等任务 32 契约）；⑤B3 验收校准为"省往返非省推理"；⑥C3 默认 0=不限（向后兼容优先于文档建议的默认 6000 万，部署 env 显式设置）；⑦A1 复核销掉 image 0.25.10 API 可用性待确认项（apply_orientation/NoTransforms 空操作已核实）。
