@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod error;
 mod routes;
+mod slots;
 mod version;
 
 use std::sync::Arc;
