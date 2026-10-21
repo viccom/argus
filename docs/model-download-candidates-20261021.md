@@ -88,3 +88,29 @@
 **过程发现（重要教训）**：首轮 A/B 三模型返回完全相同（连置信度都一致），差点误判"槽串了"。真相：首个槽请求发生在构建完成前，响应以**毫秒级竞态**返回旧池？——复盘为**首轮请求时槽未构建完成、响应正常但 /models 的 loaded 尚未刷新**的观测时序问题；完整 JSON diff 判别（box 坐标级）证实三模型输出确实互不相同，slot 溯源 `yolov8s.onnx#211cb4e1f537` 正确。教训：**A/B 对比必须以完整 JSON（box 级）判定，不能用 count+top3 摘要**；`dynamic_engines` 的刷新有时序差，以构建日志（"动态槽 X 池(N) 加载完成"）为准。
 
 **结论**：第一批 4 个模型，3 个通过全部前置门，2 个检测模型入槽实测可用（yolov8s 意外反超 v8n 延迟，建议作为 detection 默认升档候选），1 个分类候选待静态槽升级窗口，1 个 YOLOE 需走 segmentation 契约评估（4585 类 LVIS 词汇表，适合"万物检测"场景）。
+
+## 七、第二批实测记录（2026-10-21，魔搭社区 ModelScope）
+
+**渠道研究**：魔搭 CLI 已装（`yolo-rs/.venv`，modelscope 1.40.2；venv 迁移后 shebang 失效，用 `bin/python` 与 `bin/modelscope` 直呼）。**找高质量模型的有效方式**：① 官方背书仓 `AI-ModelScope/*`（Ultralytics 全系官方镜像，文件表 API：`/api/v1/models/<repo>/repo/files?Revision=master&Recursive=true`）；② `iic/*`（阿里达摩院官方，如 DAMO-YOLO 安全帽）；③ 网页搜索模型名关键词。通用模型搜索 API（dolphin/models 等）已 404，按 repo id 直查文件表最可靠。
+
+**下载**（modelscope download，实测 15-25MB/s）：
+
+| 文件 | 来源 repo | 大小 | 前置门 | 去向 |
+|---|---|---|---|---|
+| yolo11s.pt → yolo11s.onnx 36.3MB | `AI-ModelScope/YOLO11`（官方镜像） | `[1,84,8400]`、names 有、直跑 0~637 | ✅ | ✅ 入槽实测 |
+| damoyolo_tinynasL25_S_safetyhelmet.pt 128MB | `iic/cv_tinynas_object-detection_damoyolo_safety-helmet` | ⚠️ **非 Ultralytics 生态**：ckpt 是纯 state_dict（OrderedDict），需 DAMO-YOLO 自家推理栈重建模型 | ❌ 记录后排除 | models-dl/ 存档，待有 DAMO 推理需求时再启用 |
+
+**三方 A/B 终版**（bus.jpg，热态 7 次均值；官方 python 参照 yolo11s top=bus 0.937）：
+
+| 模型 | 延迟均值 | top1 | 两两 box 级差异 |
+|---|---|---|---|
+| v8n（基线） | 59ms | person:0.895 | — |
+| yolov8s | 104ms | bus:0.920 | 全部独立 ✓ |
+| yolo11s | 105ms | bus:0.946 | 全部独立 ✓ |
+| **yolo26n** | **39ms** | bus:0.908 | 全部独立 ✓ |
+
+> 注：昨天批次测得 v8s 54ms/yolo26n 62ms 与本批 104ms/39ms 波动较大——共享机负载漂移所致（昨晚有后台编译），**同批次内横向对比才有效**。本批内 yolo26n 显著最快（e2e NMS-free 优势），yolov8s/yolo11s 精度更高（top1 bus 0.92/0.946 vs 基线 person 0.895——三者对 bus.jpg 的最优检出类别本身不同，选型需按业务图集）。
+
+**测试方法教训（第二批新增）**：shell 循环里用未加引号的可选参数变量（`curl -F "file=..." $m`）会让空变量引发字段错位，产出"全部响应相同"的假象——A/B 脚本必须显式分支构造每类请求（本批已改）。**此假象前后共骗了我们两轮**，第三次才用单发溯源对照抓到真因。
+
+**资产留存**：`models-dl/`（.pt+onnx 共 326MB，含 DAMO 排除件）+ `models/{yolo26n,yolov8s,yolo11s}.onnx` 已验证可用件。生产 slots.toml 已清空恢复休眠。
