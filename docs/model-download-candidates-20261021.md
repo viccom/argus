@@ -114,3 +114,30 @@
 **测试方法教训（第二批新增）**：shell 循环里用未加引号的可选参数变量（`curl -F "file=..." $m`）会让空变量引发字段错位，产出"全部响应相同"的假象——A/B 脚本必须显式分支构造每类请求（本批已改）。**此假象前后共骗了我们两轮**，第三次才用单发溯源对照抓到真因。
 
 **资产留存**：`models-dl/`（.pt+onnx 共 326MB，含 DAMO 排除件）+ `models/{yolo26n,yolov8s,yolo11s}.onnx` 已验证可用件。生产 slots.toml 已清空恢复休眠。
+
+## 八、第三批实测记录（2026-10-21，HF 场景模型：裂缝/坑洞/火烟换代）
+
+**下载（hf-mirror）**：
+
+| 文件 | 来源 | 结果 |
+|---|---|---|
+| crack-seg-v8n/v8s.pt | `OpenSistemas/YOLOv8-crack-seg`（n/m 双档，Crack-seg 数据集） | ✅ 导出 `[1,37,8400]`+proto，1 类 crack |
+| pothole-vinoth.pt | `vinothvikas1987/pothole-detection-yolov8`（5 类：纵裂/横裂/龟裂/坑洞/其他，RDD 数据集） | ✅ 导出 `[1,9,8400]` |
+| cazzz307 裂缝/坑洞两仓 | HF gated 授权墙 | ❌ 未授权拿不到，**gated 仓注意**（镜像同样拒） |
+| aryantyagiase fire-smoke v8s | HF | ❌ **镜像大文件截断坑实锤**：.pt 恰 10MiB、onnx 恰 8MiB（整块截断，magic 正常但解析烂）；重试无效，该 repo 在镜像上不可用 |
+
+**前置门与 python 参照**（合成图：程序化绘制裂缝纹理/火苗烟团，`models-dl/synthetic-*.jpg`）：
+
+| 模型 | 合成图官方推理 | 判定 |
+|---|---|---|
+| crack-seg-v8n | **crack 0.906**（2 检出） | ✅ seg 任务，检测槽不适用（同 yoloe）；走 /segmentation 契约候选 |
+| crack-seg-v8s | crack 0.868（3 检出） | ✅ 同上（27M 参数 104MB onnx，重） |
+| pothole-vinoth | 合成图 0（合成裂缝风格≠RDD 真实域） | ✅ 入槽，需真实路面图评估 |
+| fire-smoke-dfire（D-Fire） | 合成火图 0（同上域差） | ✅ 入槽；**bus.jpg 检出 1 个 fire@0.34**——假阳性信号，正式换代需真实图集 A/B 现役 fire_smoke_2cls |
+
+**入槽实测（生产 :7042）**：两槽热加载 ≤7s、深检双 ok、溯源 `a2dd504313fe`/`b734753d9e1a` 正确；**class_names 注入实证**——fire_smoke_dfire 在 bus.jpg 的假阳性检出类名为注入的 `"fire"`（而非模型 metadata/数字），SH17 自训类名注入路线可行性得到实锤。
+
+**新踩坑（已录）**：
+1. **槽名禁连字符**：`fire-smoke-dfire` 被槽名正则拒绝（`^[a-z][a-z0-9_]{0,31}$`），且整份拒绝保留旧配置（fail-closed last-known-good 实战生效）——命名槽只能用 `[a-z0-9_]`。
+2. **镜像截断坑再实锤**：hf-mirror 对部分大文件按 8/10MiB 整块截断且 magic 头正常，必须大小对照源站。
+3. **gated 仓**：cazzz307 两仓（调研文档原推荐）需 HF 授权，镜像不豁免。
