@@ -58,3 +58,4 @@ E2E 冒烟需运行中的实例与真实模型；模型不入库（.gitignore �
 - conventional commit 前缀 + 中文描述，批次任务号挂尾（如 `feat(scene): …（任务 22）`）；
 - 注释/文档中文；实测数字必须带时点（如"2026-09-11 实测"），不写会腐烂的裸计数；
 - 能力进度只回填 docs/ 三计划表（engine-exposure-plan / yolo-rs-absorption-plan / homepix-integration-plan），完成即附状态+验证证据+日期，不等记忆。
+- 新文档按 `docs/conventions/documentation.md`：设计文档入 `docs/designs/YYYY-MM-DD-<topic>-design.md`，实施计划入 `docs/plans/`，并在 `docs/README.md` 索引登记。
