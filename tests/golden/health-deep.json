@@ -1,0 +1,24 @@
+{
+  "backpressure": {},
+  "configured": [
+    "detection",
+    "ppe",
+    "fire_smoke",
+    "classification",
+    "obb",
+    "segmentation",
+    "face_detection",
+    "face_recognition",
+    "reid",
+    "ocr",
+    "license_plate",
+    "qr",
+    "pose",
+    "depth",
+    "human_parsing"
+  ],
+  "device": "cpu",
+  "engine_health": [],
+  "engines": [],
+  "status": "healthy"
+}

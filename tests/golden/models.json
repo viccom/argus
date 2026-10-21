@@ -1,0 +1,144 @@
+{
+  "data": {
+    "capabilities": {
+      "classification": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "yolov8n-cls"
+        ],
+        "pipeline": "yolov8-cls224-softmax-v1"
+      },
+      "depth": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "depth_anything_v2_small"
+        ],
+        "pipeline": "depth-anything-v2-small-v1"
+      },
+      "detection": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "yolov8n"
+        ],
+        "pipeline": "yolov8-det640-letterbox-v1"
+      },
+      "face_detection": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "face_detection_yunet_2023mar"
+        ],
+        "pipeline": "yunet-det5pt-v1"
+      },
+      "face_recognition": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "face_recognition_sface_2021dec"
+        ],
+        "pipeline": "yunet+sface112-align5-emb128-v1"
+      },
+      "fire_smoke": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "fire_smoke_2cls"
+        ],
+        "pipeline": "yolov8-firesmoke2cls-det640-letterbox-v1"
+      },
+      "human_parsing": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "segformer_b2_clothes"
+        ],
+        "pipeline": "segformer-b2-atr18-v1"
+      },
+      "license_plate": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "mnet_plate",
+          "Final_LPRNet_model"
+        ],
+        "pipeline": "mnet-det+lprnet-rec-v1"
+      },
+      "obb": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "yolov8n-obb"
+        ],
+        "pipeline": "yolov8-obb640-v1"
+      },
+      "ocr": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "ppocrv5_det",
+          "ppocrv5_rec"
+        ],
+        "pipeline": "ppocrv5-det960+rec-chn-v1"
+      },
+      "pose": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "yolov8n-pose"
+        ],
+        "pipeline": "yolov8-pose17-coco-v1"
+      },
+      "ppe": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "ppe_site_10cls"
+        ],
+        "pipeline": "yolov8-ppe10cls-det640-letterbox-v1"
+      },
+      "qr": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "wechat_qr_detect"
+        ],
+        "pipeline": "wechatqr-ssd-det416-v1"
+      },
+      "reid": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "osnet_x1_0"
+        ],
+        "pipeline": "osnet-256x128-emb512-v1"
+      },
+      "segmentation": {
+        "configured": true,
+        "enabled": true,
+        "loaded": false,
+        "models": [
+          "yolov8m-seg"
+        ],
+        "pipeline": "yolov8-seg640-mask-proto-v1"
+      }
+    }
+  },
+  "status": "success"
+}
