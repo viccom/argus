@@ -32,6 +32,10 @@
 |---|---|---|---|---|---|---|---|
 | 16 | **yolov8s.onnx** | 检测，COCO 80 | 44.9MB | 211cb4e1f537 | github ultralytics/assets v8.4.0 + venv 导出 | count=5，top1 bus 0.920，两批热态均值 54-104ms（批次波动大，共享机负载）；官方参照一致 | **detection 默认升档首选**：精度高于 v8n；切默认需改 ARGUS_DETECTION_MODEL+重启 |
 | 17 | **yolo11s.onnx** | 检测，COCO 80 | 38.1MB | cbdf4ed84a3a | **魔搭** `AI-ModelScope/YOLO11`（官方镜像）+ venv 导出 | count=5，top1 **bus 0.946**（三方最高；官方参照 0.937 同族），105-57ms | 精度王候选；来源证明魔搭官方镜像可信 |
+| 19 | **pothole-vinoth.onnx** | 检测，5 类路面病害（纵裂/横裂/龟裂/坑洞/其他） | 43.7MB | a2dd504313fe | HF [vinothvikas1987/pothole-detection-yolov8](https://huggingface.co/vinothvikas1987/pothole-detection-yolov8) + venv 导出（class_names 注入实测过） | 入槽 ok：溯源正确、深检 ok、bus.jpg 0 检出（负样本正确）；**需真实路面图评估精度**（合成图 0 检出，域差）（2026-10-21） |
+| 21 | **forklift-yolov8s.onnx** | 检测，forklift+person 双类（mAP50 0.851） | 44.9MB | 95dca951a55f | HF [keremberke/yolov8s-forklift-detection](https://huggingface.co/keremberke/yolov8s-forklift-detection)（roboflow2huggingface 官方镜像） | ✅ 入槽实测（2026-10-21）：溯源正确、bus.jpg 检出 person×4+forklift@0.36、类名注入生效、深检 ok；工地 27 类清单 #15 叉车的部分覆盖件（含人车同框） |
+| 21 | **vehicle-classifier-vmmrdb-full.onnx** | 分类，**8949 类机动车品牌-型号-年份**（VMMRdb） | 129MB（内联） | — | HF [Jordo23/vehicle-classifier](https://huggingface.co/Jordo23/vehicle-classifier) .pth + timm 自导（官方 onnx 缺外置权重 .data，见 §三） | ✅ 语义验证：zidane 轿车 top1 `Acura MDX 2012` conf 0.529、大巴域外 max 0.026（2026-10-21）；EfficientNet-B4 380×380，类名表 models-dl/vehicle-classifier-class-mapping.csv（8951 行）；**接入走 classification 静态槽**（注意无 names metadata，需 csv 映射或二次烘焙） |
+| 20 | **fire-smoke-dfire.onnx** | 检测，smoke/fire 2 类（D-Fire 数据集） | 11.7MB | b734753d9e1a | HF [rabahdev/fire-smoke-yolov8n](https://huggingface.co/rabahdev/fire-smoke-yolov8n) + venv 导出 | 入槽 ok；**bus.jpg 假阳性 fire@0.34**——换代前必须真实图集 A/B 现役 fire_smoke_2cls（2026-10-21） |
 | 18 | **yolo26n.onnx** | 检测，COCO 80，NMS-free e2e | 9.9MB | 4fd0c3d74b65 | github ultralytics/assets v8.4.0 + venv 导出 | count=5，top1 bus 0.908，**39ms（全场最快，同批内）** | 速度王候选；e2e 布局与传统同形，引擎兼容实证 |
 
 > §二选型口径：**同批次内横向对比才有效**——两批次间延迟波动 40-90ms（共享机后台编译干扰）；精度看 top1 类别差异（三个模型对 bus.jpg 最优检出类别本身不同：v8n=person、v8s/11s/26n=bus），正式选型需按业务图集。
@@ -41,14 +45,17 @@
 
 | # | 模型 | 大小 | sha256(前12) | 验证结论（时点） | 排除/受限原因 | 处置 |
 |---|---|---|---|---|---|---|
-| 19 | yoloe-26n-seg-pf.onnx | 15.7MB | 8100a38ff740 | 前置门通过：`[1,4621,8400]`+proto，值域正常（2026-10-21） | **4585 类 LVIS 词汇表 + segment 任务**——掩码输出应走 `/segmentation` 契约（上游 seg 引擎），检测族槽不适用；且 ONNX 导出为静态检测器（prompt 烘焙，换词汇表=重新导出，ultralytics issue #25530） | onnx+pt 存 models-dl/；走 seg 契约的评估挂后续 |
-| 20 | yolov8s-cls.onnx | 25.5MB | 93b2bef743c8 | 前置门通过：`[1,1000]` softmax（2026-10-21） | 分类非检测族，无动态槽；仅作静态 classification 升档候选（n→s 精度 69→73.8） | onnx+pt 存 models-dl/；与 #4 同能力，切换需改 env+重启 |
-| 21 | Xenova/yolo-rs yolov8n 变体 | — | — | 2026-09 判别：bbox 零宽、类名数字、SAHI count=0 | 检测头输出**归一化坐标**（cx∈[0,1]）且无类名元数据，与 640 像素空间反算解码器不兼容 | **纪律性禁入**：官方重导出替代；判别法=python 直跑看 cx 值域（踩坑表 #122） |
-| 22 | jashwanthpeddisetty0712 yolov8m-ppe-14cls | — | — | 前置门过（`[1,18,8400]`）但实拍全面落败：工地图 Person 召回 0（现役 10 类同图 25 检出含 Person×9）、摔倒图零检出、.pt 原生推理复现（排除导出损失）、CPU 566ms 慢一倍（2026-09-27） | README mAP50=0.79 与实拍泛化严重不符 | **不换**，现役 ppe_site_10cls 保留；升级路线转自训 SH17 |
-| 23 | melihuzunoglu yolov11-ppe（4-5 类） | — | — | 纸面评估淘汰（2026-09-27） | 类别面不足：无 NO-Vest 直接类、无机械车辆 | 未下载 |
-| 24 | qualcomm gear_guard_net | — | — | 布局核验（2026-09 PPE 选型） | 三输出自定义头（boxes/scores/class_idx），非 v8 标准布局，DetectionEngine 不可复用 | 弃用；教训：接入前先 dump 输出 shape |
-| 25 | wechat_qr_detect 原版（384 输入） | — | — | 布局核验（2026-09） | OpenCV 版头尾结构（PriorBox+DetectionOutput）无法直接接入 | **经图手术改造后启用**（→§一 #12），手术过程存 `e2e-and-models.md` §2.3 |
-| 26 | damoyolo_tinynasL25_S_safetyhelmet.pt | 128MB | — | ckpt 结构核验：纯 state_dict（OrderedDict），无模型定义不可直接前向（2026-10-21，魔搭 iic 官方） | **非 Ultralytics 生态**（DAMO-YOLO 自研 tinynas 架构），需自家推理栈重建+导出，超出"即下即用"范围 | pt 存 models-dl/；安全帽场景已有 ppe_site_10cls 覆盖，无近期需求 |
+| 19 | crack-seg-v8n/v8s.onnx（OpenSistemas） | 12.7/106.1MB | — | 前置门过：`[1,37,8400]`+proto，合成裂缝图官方推理 crack 0.87-0.91（2026-10-21） | **seg 任务**——掩码输出走 /segmentation 契约，检测槽不适用（同 YOLOE）；v8s 档 106MB 偏重 | onnx 存 models-dl/；seg 契约评估挂后续 |
+| 20 | aryantyagiase fire-smoke v8s（best.pt/onnx） | — | — | 下载验证（2026-10-21） | **hf-mirror 大文件截断**：.pt 恒 10MiB、onnx 恒 8MiB（整块截断 magic 正常），重试无效 | 该 repo 经镜像不可用；火烟换代改用 #20 fire-smoke-dfire |
+| 21 | cazzz307/yolov8-crack-detection + Pothole-Finetuned-YoloV8 | — | — | 下载验证（2026-10-21） | **HF gated 授权墙**（镜像不豁免） | 未获授权不追；替代件已验证（§二 #19） |
+| 22 | damoyolo_tinynasL25_S_safetyhelmet.pt | 15.7MB | 8100a38ff740 | 前置门通过：`[1,4621,8400]`+proto，值域正常（2026-10-21） | **4585 类 LVIS 词汇表 + segment 任务**——掩码输出应走 `/segmentation` 契约（上游 seg 引擎），检测族槽不适用；且 ONNX 导出为静态检测器（prompt 烘焙，换词汇表=重新导出，ultralytics issue #25530） | onnx+pt 存 models-dl/；走 seg 契约的评估挂后续 |
+| 24 | yolov8s-cls.onnx | 25.5MB | 93b2bef743c8 | 前置门通过：`[1,1000]` softmax（2026-10-21） | 分类非检测族，无动态槽；仅作静态 classification 升档候选（n→s 精度 69→73.8） | onnx+pt 存 models-dl/；与 #4 同能力，切换需改 env+重启 |
+| 25 | Xenova/yolo-rs yolov8n 变体 | — | — | 2026-09 判别：bbox 零宽、类名数字、SAHI count=0 | 检测头输出**归一化坐标**（cx∈[0,1]）且无类名元数据，与 640 像素空间反算解码器不兼容 | **纪律性禁入**：官方重导出替代；判别法=python 直跑看 cx 值域（踩坑表 #122） |
+| 26 | jashwanthpeddisetty0712 yolov8m-ppe-14cls | — | — | 前置门过（`[1,18,8400]`）但实拍全面落败：工地图 Person 召回 0（现役 10 类同图 25 检出含 Person×9）、摔倒图零检出、.pt 原生推理复现（排除导出损失）、CPU 566ms 慢一倍（2026-09-27） | README mAP50=0.79 与实拍泛化严重不符 | **不换**，现役 ppe_site_10cls 保留；升级路线转自训 SH17 |
+| 27 | melihuzunoglu yolov11-ppe（4-5 类） | — | — | 纸面评估淘汰（2026-09-27） | 类别面不足：无 NO-Vest 直接类、无机械车辆 | 未下载 |
+| 28 | qualcomm gear_guard_net | — | — | 布局核验（2026-09 PPE 选型） | 三输出自定义头（boxes/scores/class_idx），非 v8 标准布局，DetectionEngine 不可复用 | 弃用；教训：接入前先 dump 输出 shape |
+| 29 | wechat_qr_detect 原版（384 输入） | — | — | 布局核验（2026-09） | OpenCV 版头尾结构（PriorBox+DetectionOutput）无法直接接入 | **经图手术改造后启用**（→§一 #12），手术过程存 `e2e-and-models.md` §2.3 |
+| 30 | damoyolo_tinynasL25_S_safetyhelmet.pt | 128MB | — | ckpt 结构核验：纯 state_dict（OrderedDict），无模型定义不可直接前向（2026-10-21，魔搭 iic 官方） | **非 Ultralytics 生态**（DAMO-YOLO 自研 tinynas 架构），需自家推理栈重建+导出，超出"即下即用"范围 | pt 存 models-dl/；安全帽场景已有 ppe_site_10cls 覆盖，无近期需求 |
 
 ## 四、横向维度速查
 
@@ -62,4 +69,4 @@
 
 ## 变更记录
 
-- 2026-10-21：首版。汇总现役 15（含 2 组多模型件）、已验证未启用 3、受限/排除 8，共 26 项；实测数据回源自 README 模型表、engine-exposure-plan 验证列、e2e-and-models 踩坑表、两批下载实测（b62257e/af823e0）。
+- 2026-10-21：27 类工地车型专项（`314a7fe`）+1（forklift 双类件，附落地路线评估：无现成 27 类模型，推荐业务图集自训单模型 27 类走动态槽）。第四批（`645dc04`）+2：VMMRdb 8949 类车型识别（timmm 自导内联，语义验证过）、Stanford Cars 受限件。三批补充（`177d8ee`/本提交）。§二 +2（pothole-vinoth、fire-smoke-dfire 入槽验证）；§三 +3（crack-seg 双档 seg 不适用、镜像截断件、gated 仓）。首版。汇总现役 15（含 2 组多模型件）、已验证未启用 3、受限/排除 8，共 33 项；实测数据回源自 README 模型表、engine-exposure-plan 验证列、e2e-and-models 踩坑表、两批下载实测（b62257e/af823e0）。

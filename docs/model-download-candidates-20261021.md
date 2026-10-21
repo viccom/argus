@@ -114,3 +114,67 @@
 **测试方法教训（第二批新增）**：shell 循环里用未加引号的可选参数变量（`curl -F "file=..." $m`）会让空变量引发字段错位，产出"全部响应相同"的假象——A/B 脚本必须显式分支构造每类请求（本批已改）。**此假象前后共骗了我们两轮**，第三次才用单发溯源对照抓到真因。
 
 **资产留存**：`models-dl/`（.pt+onnx 共 326MB，含 DAMO 排除件）+ `models/{yolo26n,yolov8s,yolo11s}.onnx` 已验证可用件。生产 slots.toml 已清空恢复休眠。
+
+## 八、第三批实测记录（2026-10-21，HF 场景模型：裂缝/坑洞/火烟换代）
+
+**下载（hf-mirror）**：
+
+| 文件 | 来源 | 结果 |
+|---|---|---|
+| crack-seg-v8n/v8s.pt | `OpenSistemas/YOLOv8-crack-seg`（n/m 双档，Crack-seg 数据集） | ✅ 导出 `[1,37,8400]`+proto，1 类 crack |
+| pothole-vinoth.pt | `vinothvikas1987/pothole-detection-yolov8`（5 类：纵裂/横裂/龟裂/坑洞/其他，RDD 数据集） | ✅ 导出 `[1,9,8400]` |
+| cazzz307 裂缝/坑洞两仓 | HF gated 授权墙 | ❌ 未授权拿不到，**gated 仓注意**（镜像同样拒） |
+| aryantyagiase fire-smoke v8s | HF | ❌ **镜像大文件截断坑实锤**：.pt 恰 10MiB、onnx 恰 8MiB（整块截断，magic 正常但解析烂）；重试无效，该 repo 在镜像上不可用 |
+
+**前置门与 python 参照**（合成图：程序化绘制裂缝纹理/火苗烟团，`models-dl/synthetic-*.jpg`）：
+
+| 模型 | 合成图官方推理 | 判定 |
+|---|---|---|
+| crack-seg-v8n | **crack 0.906**（2 检出） | ✅ seg 任务，检测槽不适用（同 yoloe）；走 /segmentation 契约候选 |
+| crack-seg-v8s | crack 0.868（3 检出） | ✅ 同上（27M 参数 104MB onnx，重） |
+| pothole-vinoth | 合成图 0（合成裂缝风格≠RDD 真实域） | ✅ 入槽，需真实路面图评估 |
+| fire-smoke-dfire（D-Fire） | 合成火图 0（同上域差） | ✅ 入槽；**bus.jpg 检出 1 个 fire@0.34**——假阳性信号，正式换代需真实图集 A/B 现役 fire_smoke_2cls |
+
+**入槽实测（生产 :7042）**：两槽热加载 ≤7s、深检双 ok、溯源 `a2dd504313fe`/`b734753d9e1a` 正确；**class_names 注入实证**——fire_smoke_dfire 在 bus.jpg 的假阳性检出类名为注入的 `"fire"`（而非模型 metadata/数字），SH17 自训类名注入路线可行性得到实锤。
+
+**新踩坑（已录）**：
+1. **槽名禁连字符**：`fire-smoke-dfire` 被槽名正则拒绝（`^[a-z][a-z0-9_]{0,31}$`），且整份拒绝保留旧配置（fail-closed last-known-good 实战生效）——命名槽只能用 `[a-z0-9_]`。
+2. **镜像截断坑再实锤**：hf-mirror 对部分大文件按 8/10MiB 整块截断且 magic 头正常，必须大小对照源站。
+3. **gated 仓**：cazzz307 两仓（调研文档原推荐）需 HF 授权，镜像不豁免。
+
+## 九、第四批实测记录（2026-10-21，机动车品牌/型号识别专项）
+
+**检索结论（全网多渠道）**：车型识别（VMMR，Vehicle Make & Model Recognition）可用 ONNX 资源集中在 HF；魔搭无相关仓（iic 只有 DAMO 检测系与通用分类底座）。数据集谱系：VMMRdb（8949 类 品牌-型号-年份，最大）、Stanford Cars（196 类）、CompCars（136 类+属性）。**NVIDIA TAO VehicleMakeNet/VehicleTypeNet**（品牌/6 类车型）质量有背书但 NGC 下载需账号+TAO 栈，未纳入。
+
+| 模型 | 来源 | 形态 | 验证结果 |
+|---|---|---|---|
+| **vehicle-classifier（VMMRdb 8949 类）** | HF `Jordo23/vehicle-classifier`（非 gated） | **EfficientNet-B4 380×380**，logits `[batch,8949]`，附带 class_mapping.csv（类名/make/model 三列） | ✅ **语义验证通过**：zidane 轿车图 top1 `Acura MDX 2012` conf **0.529**（8949 类细粒度下高置信）；大巴域外图最高 0.026（判别力清晰） |
+| resnet50-cars（Stanford Cars 196 类） | HF `zededa/resnet50-cars`（非 gated） | ResNet50 224×224，`[batch,196]` | ⚠️ 前置门过（直跑正常）但 **ONNX 无 metadata 无类映射文件**——196 个索引无法落地为品牌型号名，可用性打折；zidane top1 conf 仅 0.048 也明显弱于上者 |
+
+**关键处置：官方 ONNX 缺 .data 外置权重文件**（仓内只放 927KB 图结构 + .pth，引用的 `vehicle_classifier_*.onnx.data` 不存在——HF 外置权重发布常见失误）。**处置=用仓内 .pth + timm 重建 EfficientNet-B4 自导完整内联 ONNX**（129MB，`vehicle-classifier-vmmrdb-full.onnx`），验证通过。timm 已补装进 yolo-rs/.venv（1.0.30）。
+
+**接入 argus 的形态判断**：分类模型走 **classification 静态槽**（`ARGUS_CLASSIFICATION_MODEL` + 重启；分类无动态槽）——但注意：① 现有 `/classify` 契约是 YOLOv8-cls 的 softmax+metadata 自动读名；EfficientNet 无 names metadata，需仓内 csv 做类名映射（引擎 `get_label_name` 会退化为数字，消费方按 csv 解）或二次烘焙 metadata；② 380×380 输入 vs 现役 224，warmup/预处理无冲突但延迟上升（B4 级 CPU 预估 200-400ms，待入槽实测）；③ 部署形态更契合"检测框 → 裁剪 → 分类"的两段式（G3），与现有 face_rec 的架构同构。
+
+**资产留存**：models-dl/（full.onnx 129MB + .pth 132MB + 官方残缺 onnx + csv 类表 + resnet50 96MB）。
+
+## 十、工地车型清单专项评估（2026-10-21，27 类工程机械识别可行性）
+
+**需求**：用户整理了 27 类工地常用车型（挖掘机/推土机/起重机/自卸车/叉车/摊铺机/压实机等），寻求准确识别的现成模型。
+
+**全网检索结论**：**不存在覆盖该 27 类的现成 ONNX 模型**。工地机械识别的公开资源格局：
+- 学术数据集多为 5-12 类（excavator/loader/dozer/roller/backhoe 为主，ASCE 2023 九类、Mendeley 2025 十二类、MDPI 2024 五类土方），无 27 类全覆盖；
+- Roboflow Universe 有大量单场景小数据集（多为 3-19 类、几百到几千张，质量参差，权重需 API key 且许可不一）；
+- HF keremberke 系列（roboflow2huggingface 官方镜像，非 gated）只有叉车相关：`yolov8s-forklift-detection`（forklift+person 双类，mAP50 0.851）；
+- 中文社区（CSDN/腾讯云）有 8 类/27000 张等数据集售卖贴，无直接权重下载。
+
+**本批实测**：
+| 模型 | 来源 | 结果 |
+|---|---|---|
+| forklift-yolov8s.onnx（forklift+person 双类） | HF `keremberke/yolov8s-forklift-detection`（mAP50 0.851） | ✅ 入槽全过：溯源 `95dca951a55f`、bus.jpg 检出 person×4 + forklift@0.36（人工判读 bus 图左下黄色物体确有歧义性）、类名注入生效、深检 ok。清单 #15 叉车可部分覆盖（含人车同框） |
+
+**27 类落地路线评估（结论：检测槽底座已就绪，缺的是数据）**：
+1. **可行路线（推荐）**：按清单整理业务图集（每类 ≥300-500 张实拍，覆盖俯视/侧视/远近）→ 用现役 venv ultralytics 训练 YOLOv8s 检测模型（单模型 27 类）→ 导出后 slots.toml 入槽（零代码发版）。工地监控摄像头固定机位，采集成本低；近似公开数据集（5-12 类）可做预训练起点再迁移。
+2. **部分覆盖捷径**：高频核心类（挖掘机/推土机/起重机/自卸车/叉车 5 类）可先组合 keremberke 叉车件 + Roboflow 公开数据集自训，其余低频类后续补。
+3. **不推荐**：拼多个单类模型（槽多、维护碎、类间冲突）；纯分类方案（无法定位，工地图多目标）。
+
+**资产留存**：forklift-yolov8s.onnx/pt 存 models-dl/，onnx 已入 models/。
