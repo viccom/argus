@@ -21,6 +21,7 @@ use rust_onnx_infer::OnnxInferenceEngine;
 
 use crate::config::Config;
 use crate::error::AppError;
+use crate::slots::{Slot, SlotRegistry, SlotSpec};
 
 /// 检测引擎构造阈值(下限)。引擎是 Arc 共享不可变,每请求 `confidence` 在 HTTP 层
 /// 后过滤(类内 NMS 保序:低阈值结果是任意高阈值结果的超集,后过滤严格等价)。
@@ -157,11 +158,16 @@ pub struct EngineManager {
     human_parsing: tokio::sync::OnceCell<Arc<EnginePool<HumanParsingEngine>>>,
     /// A4 溯源缓存：能力键 → ModelInfo（model 串含文件 hash，首查后缓存）。
     model_registry: std::sync::RwLock<std::collections::HashMap<String, ModelInfo>>,
+    /// 检测族动态槽（slots.toml）。静态 3 槽保持 OnceCell——registry 纯增量（设计 C1）。
+    /// 生产消费方在 T8 路由接线后就位，届时移除 allow（增量交付中间态）。
+    #[allow(dead_code)]
+    pub(crate) slots: SlotRegistry<DetectionEngine>,
 }
 
 impl EngineManager {
     pub fn new(config: Config) -> Self {
         let device = DeviceType::from_name(&config.device);
+        let slots = Self::build_slot_registry(device, config.engine_pool);
         EngineManager {
             config,
             device,
@@ -181,7 +187,48 @@ impl EngineManager {
             depth: tokio::sync::OnceCell::new(),
             human_parsing: tokio::sync::OnceCell::new(),
             model_registry: std::sync::RwLock::new(std::collections::HashMap::new()),
+            slots,
         }
+    }
+
+    /// 生产 build 闭包：与静态检测槽同参数（低阈值 + 全局 NMS IoU），
+    /// class_names 注入（数量不符仅 warn），预热失败 warn 不阻断（设计 §4.2/§4.4）。
+    fn build_slot_registry(device: DeviceType, default_pool: usize) -> SlotRegistry<DetectionEngine> {
+        let build = move |spec: &SlotSpec, device: DeviceType| -> Result<EnginePool<DetectionEngine>, AppError> {
+            let pool_size = spec.pool_size.unwrap_or(default_pool).max(1);
+            let mut engines = Vec::with_capacity(pool_size);
+            for _ in 0..pool_size {
+                let mut engine = DetectionEngine::for_yolo(
+                    &spec.model_path, device, DETECTION_CONFIDENCE_FLOOR, DETECTION_NMS_IOU,
+                )?;
+                if let Some(names) = &spec.class_names {
+                    // 自训模型常缺 metadata：数量不符仅 warn，以 class_names 为准
+                    if let Some(model_labels) = engine.base.labels() {
+                        if model_labels.len() != names.len() {
+                            tracing::warn!(
+                                "槽 {} class_names({}) 与模型 labels({}) 数量不一致，以 class_names 为准",
+                                spec.name, names.len(), model_labels.len()
+                            );
+                        }
+                    }
+                    engine.base.set_labels(names.clone());
+                }
+                engines.push(Arc::new(engine));
+            }
+            let pool = EnginePool::new(engines);
+            // 预热：每实例 dummy 推理，失败 warn 不阻断。本闭包运行于 spawn_blocking，
+            // 同步执行与静态槽 EnginePool::warmup 的阻塞路径语义等价
+            let (w, h) = spec.warmup_size.unwrap_or((640, 640));
+            for (idx, engine) in pool.instances.iter().enumerate() {
+                match engine.predict(&dummy_image(w as i32, h as i32)).map(|_| ()) {
+                    Ok(()) => tracing::info!("槽 {} 实例 {}/{} 预热完成", spec.name, idx + 1, pool_size),
+                    Err(e) => tracing::warn!("槽 {} 实例 {}/{} 预热失败(不阻断): {e}", spec.name, idx + 1, pool_size),
+                }
+            }
+            tracing::info!("动态槽 {} 池({pool_size}) 加载完成: {}", spec.name, spec.model_path.display());
+            Ok(pool)
+        };
+        SlotRegistry::new(device, Arc::new(build))
     }
 
     // ---- A4 溯源 ----
@@ -285,6 +332,58 @@ impl EngineManager {
         check_engine!(self.pose, "pose", DynPose, results);
         check_engine!(self.depth, "depth", DynDepth, results);
         check_engine!(self.human_parsing, "human_parsing", HumanParsingEngine, results);
+        results
+    }
+
+    // ---- 动态槽（F2：装配、请求路径解析、观测） ----
+    // 三个入口的生产消费方在 T8（detection 路由 model 参数）与 T9（/health deep、
+    // /models）接入——当前仅测试引用，dead_code 属增量交付中间态，接入后移除 allow。
+
+    /// 检测族动态槽解析（三端点与 /detect/batch 的 `model` 参数入口）。
+    /// 保留字（15 能力键）→ BadRequest 提示改用对应端点；白名单按 detection
+    /// 门控（设计 §4.6）；未注册槽 → UnknownModel（列出可用槽名，不泄露路径）。
+    #[allow(dead_code)]
+    pub async fn resolve_dynamic_slot(
+        &self,
+        name: &str,
+    ) -> Result<(Arc<Slot<DetectionEngine>>, Arc<EnginePool<DetectionEngine>>), AppError> {
+        if crate::config::CAPABILITY_KEYS.contains(&name) {
+            return Err(AppError::BadRequest(format!(
+                "model={name} 是静态能力键：请使用对应端点，或去掉 model 走该端点预置槽"
+            )));
+        }
+        self.ensure_enabled("detection")?;
+        self.slots.resolve(name).await
+    }
+
+    /// 已加载动态槽名（/health deep 的 dynamic_engines，字典序）。
+    #[allow(dead_code)]
+    pub fn dynamic_loaded(&self) -> Vec<String> {
+        self.slots
+            .slots_snapshot()
+            .into_iter()
+            .filter(|s| s.loaded())
+            .map(|s| s.spec.name.clone())
+            .collect()
+    }
+
+    /// 动态槽深检：对每个已加载槽发 dummy 推理（与 check_engine! 同语义，
+    /// 未加载槽跳过）。槽名是 String，与静态 engine_health 的 &'static str 分列
+    /// 两个字段（设计 C3）。
+    #[allow(dead_code)]
+    pub async fn dynamic_slot_health(&self) -> Vec<crate::slots::DynamicSlotHealth> {
+        let mut results = Vec::new();
+        for slot in self.slots.slots_snapshot() {
+            let Some(pool) = slot.pool() else { continue };
+            let status = pool
+                .run(|e| e.predict(&dummy_image(640, 640)).map(|_| ()))
+                .await;
+            results.push(crate::slots::DynamicSlotHealth {
+                name: slot.spec.name.clone(),
+                status: if status.is_ok() { "ok" } else { "degraded" },
+                error: status.err().map(|e| e.to_string()),
+            });
+        }
         results
     }
 
@@ -1173,5 +1272,74 @@ mod tests {
         };
         let mgr = EngineManager::new(config);
         assert!(mgr.model_info("ocr").await.is_none(), "缺 rec 模型不应报告半套溯源");
+    }
+
+    // ---- 动态槽接线（F2） ----
+
+    use crate::slots::{parse_slots_toml, SLOT_PIPELINE};
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("argus-em-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn registry_with_slot(dir: &std::path::Path, name: &str) -> EngineManager {
+        let config = Config {
+            models_dir: dir.to_path_buf(),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config.clone());
+        std::fs::write(dir.join("m.onnx"), b"fake").unwrap();
+        mgr.slots.apply_specs(
+            parse_slots_toml(&format!("[slots.{name}]\nmodel = \"m.onnx\"\n"), dir).unwrap(),
+        );
+        mgr
+    }
+
+    #[tokio::test]
+    async fn resolve_dynamic_slot_should_reject_reserved_names() {
+        let mgr = EngineManager::new(Config::default());
+        for key in ["detection", "ppe", "fire_smoke"] {
+            let err = mgr.resolve_dynamic_slot(key).await.err().expect("保留字应拒绝");
+            assert!(matches!(err, AppError::BadRequest(_)), "{key} 实际: {err:?}");
+            assert!(err.to_string().contains("端点"), "应提示改用端点: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_dynamic_slot_should_return_unknown_model_when_unregistered() {
+        let mgr = EngineManager::new(Config::default());
+        let err = mgr.resolve_dynamic_slot("nope").await.err().expect("未注册应拒绝");
+        assert!(matches!(err, AppError::UnknownModel(_)), "实际: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn resolve_dynamic_slot_should_gate_on_detection_whitelist() {
+        // 白名单不含 detection：所有动态检测槽拒绝（设计 §4.6），即使槽已注册
+        let dir = tmp_dir("wl");
+        let config = Config {
+            models_dir: dir.clone(),
+            enabled_capabilities: Some(vec!["ppe".to_string()]),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        std::fs::write(dir.join("m.onnx"), b"fake").unwrap();
+        mgr.slots.apply_specs(parse_slots_toml("[slots.x]\nmodel = \"m.onnx\"\n", &dir).unwrap());
+        let err = mgr.resolve_dynamic_slot("x").await.err().expect("应被白名单拒绝");
+        assert!(matches!(err, AppError::CapabilityDisabled(_)), "实际: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn dynamic_loaded_and_deep_health_should_reflect_registry() {
+        let dir = tmp_dir("deep");
+        let mgr = registry_with_slot(&dir, "probe");
+        assert_eq!(mgr.dynamic_loaded(), Vec::<String>::new(), "未构建应为空");
+        let health = mgr.dynamic_slot_health().await;
+        assert!(health.is_empty(), "未加载槽不进深检");
+        // 槽级溯源走 registry（不构建引擎也能取）
+        let slot = mgr.slots.slot("probe").unwrap();
+        let mi = slot.model_info().await.unwrap();
+        assert_eq!(mi.pipeline, SLOT_PIPELINE);
     }
 }

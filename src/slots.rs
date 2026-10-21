@@ -4,8 +4,9 @@
 //! 静态 3 槽（detection/ppe/fire_smoke 的 OnceCell）不在本模块管理——registry
 //! 纯增量（设计 C1），`slots.toml` 缺失时动态槽为空、行为零回归。
 
-// 本模块的生产消费者在后续任务接入（T5 注册表 / T6 热重载），当前仅测试引用，
-// bin 目标下 dead_code 属增量交付的已知中间态——接入后移除本 allow。
+// 本模块的生产消费方分两批接入：T7 已装配 EngineManager（registry/build/深检），
+// parse_slots_toml/file_fingerprint/reload_once 待 T10 watch_loop 接入——当前仅
+// 测试引用，bin 目标下 dead_code 属增量交付的已知中间态——全部就位后移除本 allow。
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -22,6 +23,14 @@ use crate::error::AppError;
 
 /// 动态槽管线标识（`data.pipeline`），与静态能力键的串不同族。
 pub const SLOT_PIPELINE: &str = "detect-slot-v1";
+
+/// 动态槽深检条目（/health?deep=true 的 dynamic_slot_health）。
+#[derive(Debug, serde::Serialize)]
+pub struct DynamicSlotHealth {
+    pub name: String,
+    pub status: &'static str, // "ok" | "degraded"
+    pub error: Option<String>,
+}
 
 /// 校验后的槽规格（热重载 diff 的比较单元）。
 #[derive(Debug, Clone, PartialEq)]
@@ -450,7 +459,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::config::Config;
     use crate::engine::EnginePool;
     use crate::error::AppError;
 
@@ -838,9 +846,26 @@ mod tests {
         let p = dir.join("probe.toml");
         std::fs::write(&p, b"one").unwrap();
         let f1 = file_fingerprint(&p).expect("存在文件应有指纹");
+        // mtime 维度：等长重写内容，size 不变、mtime 显式推进 → 指纹必须变化。
+        // 显式 set_times 而非依赖两次 write 的自然间隔：Linux inode mtime 取自
+        // 内核 coarse clock（jiffy 级，非纳秒精度），同刻度内两次 write 的 mtime
+        // 相同，实测会 flake
+        std::fs::write(&p, b"two").unwrap();
+        set_mtime_ns(&p, f1.mtime_ns + 1).unwrap();
+        let f2 = file_fingerprint(&p).expect("等长重写后应有指纹");
+        assert_ne!(f1, f2, "同 size 不同 mtime 必须改变指纹");
+        assert_eq!(f1.size, f2.size, "等长重写 size 应不变");
         std::fs::write(&p, b"one-longer").unwrap();
-        let f2 = file_fingerprint(&p).expect("改写后应有指纹");
-        assert_ne!(f1, f2, "size 变化必须改变指纹");
+        let f3 = file_fingerprint(&p).expect("改写后应有指纹");
+        assert_ne!(f2, f3, "size 变化必须改变指纹");
         assert!(file_fingerprint(&dir.join("nope.toml")).is_none(), "缺失文件无指纹");
+    }
+
+    /// 测试助手：显式设置 mtime（纳秒，epoch 起），规避 coarse clock 粒度。
+    fn set_mtime_ns(path: &Path, mtime_ns: u128) -> std::io::Result<()> {
+        use std::time::{Duration, UNIX_EPOCH};
+        let f = std::fs::File::options().write(true).open(path)?;
+        let t = UNIX_EPOCH + Duration::from_nanos(mtime_ns as u64);
+        f.set_times(std::fs::FileTimes::new().set_modified(t))
     }
 }
