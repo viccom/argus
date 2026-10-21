@@ -36,10 +36,21 @@ pub struct CapabilityModels {
     /// 模型文件名去扩展名（不含目录）。多段式管线（OCR/车牌）含 det + rec，
     /// 字典等非模型文件不计入。
     pub models: Vec<String>,
+    /// 文本 Embedding 向量维度（`ARGUS_TEXT_EMBEDDING_DIM` 声明值，loader 加载期
+    /// 已校验与引擎一致）。仅 text_embedding 项出现，其余能力不序列化该字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dim: Option<usize>,
 }
 
 /// 组装单个能力项：`model_paths` 中已配置的路径取文件名去扩展名。
-fn cap(model_paths: &[&Option<PathBuf>], configured: bool, enabled: bool, loaded: bool) -> CapabilityModels {
+/// `dim` 仅文本 Embedding 携带（其余能力传 None，序列化时跳过）。
+fn cap(
+    model_paths: &[&Option<PathBuf>],
+    configured: bool,
+    enabled: bool,
+    loaded: bool,
+    dim: Option<usize>,
+) -> CapabilityModels {
     CapabilityModels {
         configured,
         enabled,
@@ -50,6 +61,7 @@ fn cap(model_paths: &[&Option<PathBuf>], configured: bool, enabled: bool, loaded
             .filter_map(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
             .collect(),
+        dim,
     }
 }
 
@@ -57,13 +69,14 @@ fn cap(model_paths: &[&Option<PathBuf>], configured: bool, enabled: bool, loaded
 /// `Config::configured_engines` 的命名一致）。
 fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
     let on = |name: &str| loaded.contains(&name);
-    let entries: [(&str, CapabilityModels); 15] = [
+    let entries: [(&str, CapabilityModels); 16] = [
         (
             "detection",
             cap(
                 &[&config.detection_model],
                 config.detection_model.is_some(),
                 config.capability_enabled("detection"), on("detection"),
+                None,
             ),
         ),
         (
@@ -72,6 +85,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.ppe_model],
                 config.ppe_model.is_some(),
                 config.capability_enabled("ppe"), on("ppe"),
+                None,
             ),
         ),
         (
@@ -80,6 +94,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.fire_smoke_model],
                 config.fire_smoke_model.is_some(),
                 config.capability_enabled("fire_smoke"), on("fire_smoke"),
+                None,
             ),
         ),
         (
@@ -88,11 +103,17 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.classification_model],
                 config.classification_model.is_some(),
                 config.capability_enabled("classification"), on("classification"),
+                None,
             ),
         ),
         (
             "obb",
-            cap(&[&config.obb_model], config.obb_model.is_some(), config.capability_enabled("obb"), on("obb")),
+            cap(
+                &[&config.obb_model],
+                config.obb_model.is_some(),
+                config.capability_enabled("obb"), on("obb"),
+                None,
+            ),
         ),
         (
             "segmentation",
@@ -100,6 +121,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.segmentation_model],
                 config.segmentation_model.is_some(),
                 config.capability_enabled("segmentation"), on("segmentation"),
+                None,
             ),
         ),
         (
@@ -108,6 +130,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.face_det_model],
                 config.face_det_model.is_some(),
                 config.capability_enabled("face_detection"), on("face_detection"),
+                None,
             ),
         ),
         (
@@ -116,6 +139,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.face_rec_model],
                 config.face_rec_model.is_some(),
                 config.capability_enabled("face_recognition"), on("face_recognition"),
+                None,
             ),
         ),
         (
@@ -124,6 +148,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.reid_model],
                 config.reid_model.is_some(),
                 config.capability_enabled("reid"), on("reid"),
+                None,
             ),
         ),
         (
@@ -135,6 +160,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                     && config.ocr_rec_model.is_some()
                     && config.ocr_dict.is_some(),
                 config.capability_enabled("ocr"), on("ocr"),
+                None,
             ),
         ),
         (
@@ -143,11 +169,17 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.plate_det_model, &config.plate_rec_model],
                 config.plate_det_model.is_some() && config.plate_rec_model.is_some(),
                 config.capability_enabled("license_plate"), on("license_plate"),
+                None,
             ),
         ),
         (
             "qr",
-            cap(&[&config.qr_model], config.qr_model.is_some(), config.capability_enabled("qr"), on("qr")),
+            cap(
+                &[&config.qr_model],
+                config.qr_model.is_some(),
+                config.capability_enabled("qr"), on("qr"),
+                None,
+            ),
         ),
         (
             "pose",
@@ -155,6 +187,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.pose_model],
                 config.pose_model.is_some(),
                 config.capability_enabled("pose"), on("pose"),
+                None,
             ),
         ),
         (
@@ -163,6 +196,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.depth_model],
                 config.depth_model.is_some(),
                 config.capability_enabled("depth"), on("depth"),
+                None,
             ),
         ),
         (
@@ -171,6 +205,20 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 &[&config.human_parsing_model],
                 config.human_parsing_model.is_some(),
                 config.capability_enabled("human_parsing"), on("human_parsing"),
+                None,
+            ),
+        ),
+        (
+            "text_embedding",
+            // tokenizer/dim 非 onnx 文件：计入三件套 configured 判定，
+            // 不出现在 models（ocr_dict 先例）；dim 是声明值（/models 刻意不触碰 session）
+            cap(
+                &[&config.text_embedding_model],
+                config.text_embedding_model.is_some()
+                    && config.text_embedding_tokenizer.is_some()
+                    && config.text_embedding_dim.is_some(),
+                config.capability_enabled("text_embedding"), on("text_embedding"),
+                config.text_embedding_dim,
             ),
         ),
     ];
@@ -188,7 +236,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
 ///
 /// 消费方（如 safe_bot）取 `capabilities.detection.models` 即该端点可用于目标
 /// 检测的模型名清单；`dynamic_slots` 是 slots.toml 动态槽的配置态/加载态
-/// （设计 C2：独立键，capabilities 15 项形状不受影响）。
+/// （设计 C2：独立键，capabilities 16 项形状不受影响）。
 pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
     let loaded = state.engines.list_loaded();
     let mut caps = capability_models(&state.config, &loaded);
@@ -202,7 +250,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
             }
         }
     }
-    // 动态槽清单（设计 C2：独立 dynamic_slots 键，capabilities 的 15 项不动——
+    // 动态槽清单（设计 C2：独立 dynamic_slots 键，capabilities 的 16 项不动——
     // safebot-go 只读 capabilities.detection.models，语义零变化）
     let mut dynamic = Map::new();
     for slot in state.engines.slots.slots_snapshot() {
@@ -264,8 +312,8 @@ mod tests {
         let caps = capability_models(&Config::default(), &[]);
         assert_eq!(
             caps.len(),
-            15,
-            "应有 15 项能力: {:?}",
+            16,
+            "应有 16 项能力: {:?}",
             caps.keys().collect::<Vec<_>>()
         );
         for (name, value) in &caps {
@@ -319,6 +367,44 @@ mod tests {
         ]);
         let cm = cap_of(&capability_models(&config, &[]), "ocr");
         assert!(!cm.configured, "缺 dict 应为未配置");
+    }
+
+    // ---- 文本 Embedding（批 D1：三件套判定 + dim 字段） ----
+
+    #[test]
+    fn text_embedding_should_require_full_triple() {
+        // 三件套（model+tokenizer+dim）缺任一即 configured=false：引擎加载必失败，
+        // 报"已配置"会误导排错（ocr 半套同款语义）
+        let only_model = Config {
+            text_embedding_model: Some(PathBuf::from("/models/bge/model.onnx")),
+            ..Config::default()
+        };
+        let cm = cap_of(&capability_models(&only_model, &[]), "text_embedding");
+        assert!(!cm.configured, "半套配置不得报已配置");
+
+        let full = Config {
+            text_embedding_model: Some(PathBuf::from("/models/bge/model.onnx")),
+            text_embedding_tokenizer: Some(PathBuf::from("/models/bge/tokenizer.json")),
+            text_embedding_dim: Some(512),
+            ..Config::default()
+        };
+        let caps = capability_models(&full, &[]);
+        let cm = cap_of(&caps, "text_embedding");
+        assert!(cm.configured, "三件套齐备才算已配置");
+        assert_eq!(
+            cm.models, ["model"],
+            "tokenizer 非 onnx 文件，不得出现在 models 清单"
+        );
+        assert_eq!(cm.dim, Some(512));
+        assert!(full.configured_engines().contains(&"text_embedding"));
+    }
+
+    #[test]
+    fn text_embedding_dim_should_be_skipped_when_unset() {
+        // 未配置（dim=None）时序列化不出现 dim 字段——其余 15 项形状逐字节不变
+        let caps = capability_models(&Config::default(), &[]);
+        let raw = serde_json::to_value(&caps["text_embedding"]).unwrap();
+        assert!(raw.get("dim").is_none(), "None 必须跳过序列化: {raw}");
     }
 
     #[test]
@@ -468,7 +554,7 @@ mod tests {
         for key in [
             "detection", "ppe", "fire_smoke", "classification", "obb", "segmentation",
             "face_detection", "face_recognition", "reid", "ocr", "license_plate", "qr",
-            "pose", "depth", "human_parsing",
+            "pose", "depth", "human_parsing", "text_embedding",
         ] {
             expected["data"]["capabilities"][key] = json!({
                 "configured": false, "enabled": true, "loaded": false, "models": [],
@@ -491,8 +577,8 @@ mod tests {
             })
             .collect();
         let uniq: std::collections::HashSet<&str> = pipelines.iter().copied().collect();
-        assert_eq!(pipelines.len(), 15, "应为 15 项能力");
-        assert_eq!(uniq.len(), 15, "pipeline 必须互不相同");
+        assert_eq!(pipelines.len(), 16, "应为 16 项能力");
+        assert_eq!(uniq.len(), 16, "pipeline 必须互不相同");
         expected["data"]["capabilities"].as_object_mut().unwrap().iter_mut().for_each(|(k, v)| {
             if !matches!(k.as_str(), "detection" | "ppe" | "fire_smoke") {
                 v["pipeline"] = body["data"]["capabilities"][k]["pipeline"].clone();
@@ -537,7 +623,7 @@ mod tests {
         assert_eq!(slot["loaded"], false, "未构建应 loaded=false: {body}");
         assert_eq!(slot["model_file"], "m.onnx", "只报文件名不报路径: {body}");
         assert_eq!(slot["pipeline"], "detect-slot-v1", "{body}");
-        // 15 项 capabilities 逐字节不受影响（golden 已锁形状，此处再锁数量）
-        assert_eq!(body["data"]["capabilities"].as_object().unwrap().len(), 15, "{body}");
+        // 16 项 capabilities 逐字节不受影响（golden 已锁形状，此处再锁数量）
+        assert_eq!(body["data"]["capabilities"].as_object().unwrap().len(), 16, "{body}");
     }
 }

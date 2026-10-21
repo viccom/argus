@@ -24,6 +24,7 @@
 | 13 | yolov8n-pose.onnx | pose `/pose` | 13.5MB | 04f6d2416266 | YOLOv8n-pose，COCO 17 关键点 | HF [Xenova/yolov8n-pose](https://huggingface.co/Xenova/yolov8n-pose)（**Xenova 系中少数可用的例外**：pose 任务无坐标反算问题） | 摔倒检测链路验证（pose_rules 输入源）；已知边界：俯卧姿态不检出（2026-09-27） |
 | 14 | depth_anything_v2_small.onnx | depth `/depth` | 99.1MB | afb6a5c28f3b | Depth Anything V2 Small | HF [onnx-community/depth-anything-v2-small](https://huggingface.co/onnx-community/depth-anything-v2-small) | 生产在用（2026-09 接入）；单推理 ~1.5s 级（优雅停机超时取值依据之一） |
 | 15 | segformer_b2_clothes.onnx | human_parsing `/human-parsing` | 110MB | a93a8dac171b | SegFormer-B2，ATR 18 类服饰部件 | HF [mattmdjaga/segformer_b2_clothes](https://huggingface.co/mattmdjaga/segformer_b2_clothes) | 生产在用（2026-09 接入）；内存大户（与 OCR 合计占全量 83%，池=1 治理依据） |
+| 19 | bge-small-zh-v1.5/model.onnx + tokenizer.json | text_embedding `/embed/text` | 90.5MB+0.4MB | 69a0b846f4f1 / 48cea5d44424 | 中文 BERT-small，512 维 CLS 池化 + L2（池化在 fork 引擎侧 `engines/text/`） | HF [Xenova/bge-small-zh-v1.5](https://huggingface.co/Xenova/bge-small-zh-v1.5)（`onnx/model.onnx` fp32 + `tokenizer.json`），MIT | E2E 全 6 项验收过（2026-10-21，:7099 临时实例）：dim=512 模长 1.0、同输入逐位相等、语义 cos 0.4899>0.1927 与 python 参照一致、并发 overload retryable、未配/空串错误码齐；性能引擎级 p95 短句 2.61ms/61tok 9.00ms、HTTP 端到端 3.6ms（预算 30ms）。**生产 bundle 部署待做**（部署后本行状态更新为生产在用；模型两文件软链入 bundle `models/bge-small-zh-v1.5/` + 三件套 env） |
 
 ## 二、已验证可用、未启用（动态槽候选，模型文件已存 models/）✅
 

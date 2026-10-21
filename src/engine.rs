@@ -15,6 +15,7 @@ use rust_onnx_infer::engines::ocr::OcrPipeline;
 use rust_onnx_infer::engines::qr_detector::QrDetector;
 use rust_onnx_infer::engines::reid::ReidEngine;
 use rust_onnx_infer::engines::segmentation::SegmentationEngine;
+use rust_onnx_infer::engines::text::TextEmbeddingEngine;
 use rust_onnx_infer::imaging::{FloatMask, Rect};
 use rust_onnx_infer::model::PoseResult;
 use rust_onnx_infer::OnnxInferenceEngine;
@@ -64,6 +65,7 @@ pub const PIPELINE_TABLE: &[(&str, &str)] = &[
     ("pose", "yolov8-pose17-coco-v1"),
     ("depth", "depth-anything-v2-small-v1"),
     ("human_parsing", "segformer-b2-atr18-v1"),
+    ("text_embedding", "bge-small-zh-v1.5|cls-pool-norm-v1|maxlen512"),
 ];
 
 /// 能力键 → 管线标识。未知能力返回空串（调用方以空串为"无溯源"信号）。
@@ -156,6 +158,7 @@ pub struct EngineManager {
     pose: tokio::sync::OnceCell<Arc<EnginePool<DynPose>>>,
     depth: tokio::sync::OnceCell<Arc<EnginePool<DynDepth>>>,
     human_parsing: tokio::sync::OnceCell<Arc<EnginePool<HumanParsingEngine>>>,
+    text_embedding: tokio::sync::OnceCell<Arc<EnginePool<TextEmbeddingEngine>>>,
     /// A4 溯源缓存：能力键 → ModelInfo（model 串含文件 hash，首查后缓存）。
     model_registry: std::sync::RwLock<std::collections::HashMap<String, ModelInfo>>,
     /// 检测族动态槽（slots.toml）。静态 3 槽保持 OnceCell——registry 纯增量（设计 C1）。
@@ -184,6 +187,7 @@ impl EngineManager {
             pose: tokio::sync::OnceCell::new(),
             depth: tokio::sync::OnceCell::new(),
             human_parsing: tokio::sync::OnceCell::new(),
+            text_embedding: tokio::sync::OnceCell::new(),
             model_registry: std::sync::RwLock::new(std::collections::HashMap::new()),
             slots,
         }
@@ -317,6 +321,7 @@ impl EngineManager {
         if self.pose.initialized() { loaded.push("pose"); }
         if self.depth.initialized() { loaded.push("depth"); }
         if self.human_parsing.initialized() { loaded.push("human_parsing"); }
+        if self.text_embedding.initialized() { loaded.push("text_embedding"); }
         loaded
     }
 
@@ -341,6 +346,22 @@ impl EngineManager {
         check_engine!(self.pose, "pose", DynPose, results);
         check_engine!(self.depth, "depth", DynDepth, results);
         check_engine!(self.human_parsing, "human_parsing", HumanParsingEngine, results);
+        // 文本引擎独立分支：无图像 predict 契约（check_engine! 宏要求 OnnxInferPredict），
+        // 用短文本 embed 替代 dummy 图像推理，语义与宏一致（实例 0、ok/degraded）
+        if let Some(pool) = self.text_embedding.get() {
+            let pool = Arc::clone(pool);
+            let status = tokio::task::spawn_blocking(move || {
+                pool.instances[0].embed("ping").map(|_| ())
+            })
+            .await
+            .map_err(|e| rust_onnx_infer::VisionError::inference(format!("深检任务失败: {e}")))
+            .and_then(|r| r);
+            results.push(EngineHealth {
+                name: "text_embedding",
+                status: if status.is_ok() { "ok" } else { "degraded" },
+                error: status.err().map(|e| e.to_string()),
+            });
+        }
         results
     }
 
@@ -821,6 +842,57 @@ impl EngineManager {
             .await
             .cloned()
     }
+
+    /// 文本 Embedding 引擎懒加载入口（批 D1）。
+    ///
+    /// 与图像引擎的差异：
+    /// - 三件套校验（model+tokenizer+dim）先于文件系统访问；
+    /// - **dim 校验**：`engine.dim()` 与 `ARGUS_TEXT_EMBEDDING_DIM` 声明不符即
+    ///   Inference 拒载（fail loud，防模型文件被悄悄替换成不同维度）；
+    /// - 预热不走 `warmup_engine` helper（其依赖图像 `OnnxInferPredict` trait），
+    ///   直接 `pool.warmup` 短文本 embed（reid loader 同款闭包写法）。
+    pub async fn text_embedding(&self) -> Result<Arc<EnginePool<TextEmbeddingEngine>>, AppError> {
+        self.text_embedding
+            .get_or_try_init(|| async {
+                self.ensure_enabled("text_embedding")?;
+                let model = self.config.text_embedding_model.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("text_embedding".into()))?;
+                let tokenizer = self.config.text_embedding_tokenizer.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("text_embedding".into()))?;
+                let expect_dim = self.config.text_embedding_dim
+                    .ok_or_else(|| AppError::ModelNotConfigured("text_embedding".into()))?;
+                let model_display = model.display().to_string();
+                let t0 = std::time::Instant::now();
+                let device = self.device;
+                let pool_size = self.config.pool_for("text_embedding");
+                let mut engines = Vec::with_capacity(pool_size);
+                for _ in 0..pool_size {
+                    let (m, t) = (model.clone(), tokenizer.clone());
+                    let engine = tokio::task::spawn_blocking(move || {
+                        TextEmbeddingEngine::new(&m, &t, device)
+                    })
+                    .await
+                    .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                    engines.push(Arc::new(engine));
+                }
+                // 各实例同模型，取实例 0 的维度与 env 声明比对
+                let actual_dim = engines.first().map(|e| e.dim()).unwrap_or(0);
+                if actual_dim != expect_dim {
+                    return Err(AppError::Inference(format!(
+                        "text_embedding 模型维度不符：引擎输出 {actual_dim} 维，ARGUS_TEXT_EMBEDDING_DIM 声明 {expect_dim} 维（拒载，防模型文件被替换）"
+                    )));
+                }
+                tracing::info!(
+                    "引擎 text_embedding 池({pool_size}) 加载完成: {model_display} dim={actual_dim} ({:?})",
+                    t0.elapsed()
+                );
+                let pool = Arc::new(EnginePool::new(engines));
+                pool.warmup(|e| e.embed("warmup").map(|_| ())).await;
+                Ok(pool)
+            })
+            .await
+            .cloned()
+    }
 }
 
 /// 引擎池：同一模型的 N 个可互换实例 + 信号量准入 + round-robin 分发。
@@ -1045,6 +1117,43 @@ mod tests {
         let result = mgr.ocr().await;
         assert!(result.is_err());
         assert!(matches!(result, Err(AppError::ModelNotConfigured(_))));
+    }
+
+    #[tokio::test]
+    async fn get_text_embedding_engine_should_error_when_not_configured() {
+        let config = Config::default();
+        let mgr = EngineManager::new(config);
+        let result = mgr.text_embedding().await;
+        assert!(result.is_err());
+        assert!(matches!(result, Err(AppError::ModelNotConfigured(_))));
+    }
+
+    #[tokio::test]
+    async fn text_embedding_with_partial_config_should_error_not_configured() {
+        // 三件套（model+tokenizer+dim）缺任一必须在触碰文件系统之前拒绝，
+        // 不得把半套配置漏成加载失败（inference_failed）
+        let config = Config {
+            text_embedding_model: Some("/nonexistent/model.onnx".into()),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.text_embedding().await.err().expect("半套配置应返回错误");
+        assert!(matches!(err, AppError::ModelNotConfigured(_)), "实际: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn text_embedding_loader_should_return_capability_disabled_when_not_whitelisted() {
+        // 三件套齐备但白名单外：CapabilityDisabled 证明拒绝先于文件系统访问
+        let config = Config {
+            text_embedding_model: Some("/nonexistent/model.onnx".into()),
+            text_embedding_tokenizer: Some("/nonexistent/tokenizer.json".into()),
+            text_embedding_dim: Some(512),
+            enabled_capabilities: Some(vec!["detection".to_string()]),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.text_embedding().await.err().expect("白名单外应返回错误");
+        assert!(matches!(err, AppError::CapabilityDisabled(_)), "实际: {err:?}");
     }
 
     #[tokio::test]

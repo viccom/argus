@@ -16,6 +16,7 @@
 | `POST /face/detect` | 人脸检测（bbox + 5 关键点；`min_face_px` bbox 短边下限 / `max_faces` 按置信度取前 N，默认均关） | YuNet |
 | `POST /face/recognize` | 人脸识别（128 维嵌入 + 余弦相似度比对；matches 含 5 关键点 landmarks 与 data.embed_dim；门控参数同 /face/detect，过滤发生在提向量之前） | SFace |
 | `POST /reid` | 行人重识别特征（multipart `file` + 可选 `boxes`=[[x1,y1,x2,y2],...] 像素框列表，缺省整图；逐框输出 512 维 L2 归一化 embedding，跨框相似度由消费方做余弦） | OSNet x1.0 |
+| `POST /embed/text` | 文本 Embedding（**JSON body** `{"texts":[".."],"mode?":"passage"\|"query","normalize?":true}`；texts 1..128 条、单条 ≤2000 字符、空字符串拒绝；逐条返回 512 维 **L2 归一化**向量——余弦退化为点积；`mode` 两值等价实现（bge v1.5 短查询无需指令前缀）；`normalize=false` 暂不支持（显式报错）；同输入逐位确定，换模型/池化/maxlen 则 `pipeline` 串变（向量失效判定键）；日志与错误消息不含输入文本） | bge-small-zh-v1.5 |
 | `POST /ocr` | OCR 文本检测 + 识别 | PP-OCRv5 |
 | `POST /license-plate` | 车牌检测 + 识别（mnet 关键点矫正 + LPRNet） | mnet / LPRNet |
 | `POST /qr` | 二维码检测 | WeChat QR |
@@ -51,7 +52,7 @@
 检测族新增模型从"改代码 + 发版"退化为"`slots.toml` 加一段 + 热重载"（2026-10-21 上线，吸收计划阶段 2）。示例见仓库根 [slots.example.toml](slots.example.toml)，校验规则见 `docs/designs/2026-10-21-engine-manager-dynamic-slots-design.md` §4.4。
 
 ```toml
-[slots.crack]                       # 槽名：^[a-z][a-z0-9_]{0,31}$，不得与 15 个能力键重名
+[slots.crack]                       # 槽名：^[a-z][a-z0-9_]{0,31}$，不得与 16 个能力键重名
 model = "yolov8n-crack.onnx"        # 相对 $ARGUS_MODELS_DIR；绝对路径也必须落在该目录内
 class_names = ["crack", "pothole"]  # 可选：覆盖模型 metadata 类名（自训模型常缺 metadata）
 pool_size = 1                       # 可选：缺省取 ARGUS_ENGINE_POOL，范围 1..=64
@@ -108,7 +109,8 @@ cargo build --release --jobs 6
 | `ARGUS_ACQUIRE_TIMEOUT_MS` | 30000 | 推理排队等待超时（ms）。全忙时请求等待引擎池 permit 的上限，超时返回 503。**0 = fail-fast**：不排队，全忙立即 503 |
 | `ARGUS_SLOTS_CONFIG` | 未设置 = `$ARGUS_MODELS_DIR/slots.toml` | 检测族动态槽清单（slots.toml）显式路径覆盖。文件缺失 = 无动态槽（零回归）；文件非法 → 拒绝启动（fail-closed）。部署数据默认落 gitignore 的 models/，入库示例见仓库根 `slots.example.toml` |
 | `ARGUS_SLOTS_WATCH_SECS` | 3 | slots.toml 热重载轮询周期（秒）。0 = 关闭 watcher（仅启动时加载一次）。新增/修改/删除槽 ≤2 个周期生效；同路径原地改写文件不触发（指纹 = mtime 纳秒 + size），换模型文件须原子替换后 touch slots.toml |
-| `ARGUS_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `PPE` / `FIRE_SMOKE` / `CLASSIFICATION` / `OBB` / `SEGMENTATION` / `FACE_DET` / `FACE_REC` / `REID` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`）。**命名差异**：模型路径 env 是历史缩写（`FACE_DET`/`FACE_REC`/`PLATE_DET`），新增的按能力 env（`<CAP>_POOL`/`<CAP>_WARMUP_SIZE` 等）一律用规范能力键大写（`FACE_DETECTION`/`FACE_RECOGNITION`/`LICENSE_PLATE`/`FIRE_SMOKE`），与 `/models` 的能力名一致，不引入第三套命名 |
+| `ARGUS_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `PPE` / `FIRE_SMOKE` / `CLASSIFICATION` / `OBB` / `SEGMENTATION` / `FACE_DET` / `FACE_REC` / `REID` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING` / `TEXT_EMBEDDING_MODEL`+`TEXT_EMBEDDING_TOKENIZER`+`TEXT_EMBEDDING_DIM`）。**命名差异**：模型路径 env 是历史缩写（`FACE_DET`/`FACE_REC`/`PLATE_DET`），新增的按能力 env（`<CAP>_POOL`/`<CAP>_WARMUP_SIZE` 等）一律用规范能力键大写（`FACE_DETECTION`/`FACE_RECOGNITION`/`LICENSE_PLATE`/`FIRE_SMOKE`），与 `/models` 的能力名一致，不引入第三套命名 |
+| `ARGUS_TEXT_EMBEDDING_MODEL` / `_TOKENIZER` / `_DIM` | — | 文本 Embedding 三件套（onnx 模型 / tokenizer.json / 声明维度），**齐备才算 configured**（缺任一 → `model_not_configured`）。`_DIM` 用于 `/models` 配置态回报 `dim`；引擎加载期与实际输出维度校验，不符即拒载（fail loud，防模型文件被替换）。`ARGUS_TEXT_EMBEDDING_POOL` 可独立设池（文本推理 ms 级，与检测池独立；`_WARMUP_SIZE` 不适用——预热用短 dummy 文本） |
 
 ## 模型下载
 
@@ -128,6 +130,7 @@ cargo build --release --jobs 6
 | `depth_anything_v2_small.onnx` | [onnx-community/depth-anything-v2-small](https://huggingface.co/onnx-community/depth-anything-v2-small)（`onnx/model.onnx`） |
 | `segformer_b2_clothes.onnx` | [mattmdjaga/segformer_b2_clothes](https://huggingface.co/mattmdjaga/segformer_b2_clothes)(`onnx/model.onnx`,110MB 全量) |
 | `osnet_x1_0.onnx` | Qualcomm AI Hub 官方导出（[qualcomm/OSNet](https://huggingface.co/qualcomm/OSNet) 的 `release_assets.json` S3 直链，v0.62.2）。**zip 内为外置权重格式**（osnet.onnx + osnet.data），需 `onnx.load(load_external_data=True)` + `onnx.save` 内联为单文件；输入 `image [1,3,256,128]` 静态、输出 `embeddings [1,512]` 图内已 L2 |
+| `bge-small-zh-v1.5/`（model.onnx + tokenizer.json） | [Xenova/bge-small-zh-v1.5](https://huggingface.co/Xenova/bge-small-zh-v1.5)（`onnx/model.onnx` fp32 ~90MB + 根目录 `tokenizer.json`，MIT）。中文 BERT：三 int64 `[B,L]` 输入 + `last_hidden_state [B,L,512]`，**CLS 池化 + L2 在引擎侧做**（fork `engines/text/`）。两文件同目录部署，`pipeline=bge-small-zh-v1.5\|cls-pool-norm-v1\|maxlen512`。实测 p95 短句 2.61ms/61tok 9.00ms（ur5900，2026-10-21） |
 | `yolov8m-seg.onnx` | 本地导出：`YOLO('yolov8m-seg.pt').export(format='onnx', imgsz=640, opset=12)`（.pt 取自 `ultralytics/assets` release v8.3.0）。COCO 80 类实例分割，`[1,116,8400]` + proto `[1,32,160,160]`。服务 `/segmentation` |
 | `ppe_site_10cls.onnx` | [Hansung-Cho/yolov8-ppe-detection](https://huggingface.co/Hansung-Cho/yolov8-ppe-detection) `best.pt` 本地导出（同上参数）。10 类：Hardhat/Mask/NO-Hardhat/NO-Mask/NO-Safety Vest/Person/Safety Cone/Safety Vest/machinery/vehicle（含**违章反类**）。服务 `/ppe`。qualcomm gear_guard_net 因三输出自定义头弃用 |
 | `fire_smoke_2cls.onnx` | [mfranzon/fire-smoke-yolov8](https://huggingface.co/mfranzon/fire-smoke-yolov8) `fire_smoke_yolov8.pt` 本地导出（同上参数）。fire/smoke 两类。正样本实测置信度中等（0.52~0.62，nano 级），生产采用前建议再比选模型。服务 `/fire-smoke` |

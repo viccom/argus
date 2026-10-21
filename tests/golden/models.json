@@ -137,6 +137,13 @@
           "yolov8m-seg"
         ],
         "pipeline": "yolov8-seg640-mask-proto-v1"
+      },
+      "text_embedding": {
+        "configured": false,
+        "enabled": true,
+        "loaded": false,
+        "models": [],
+        "pipeline": "bge-small-zh-v1.5|cls-pool-norm-v1|maxlen512"
       }
     }
   },

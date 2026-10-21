@@ -5,10 +5,11 @@ use std::path::PathBuf;
 /// 能力键全集（规范名，与 `/models`、`EngineManager::list_loaded`、`configured_engines`
 /// 一致）。按能力覆盖的 env（预热尺寸、池大小等）一律以能力键大写为后缀，
 /// 不引入第三套命名；与模型路径 env（`FACE_DET` 等）的差异在 README 记录。
-pub const CAPABILITY_KEYS: [&str; 15] = [
+pub const CAPABILITY_KEYS: [&str; 16] = [
     "detection", "classification", "obb", "ppe", "fire_smoke",
     "face_detection", "face_recognition", "reid", "segmentation",
     "ocr", "license_plate", "qr", "pose", "depth", "human_parsing",
+    "text_embedding",
 ];
 
 /// 服务配置。所有字段均可通过环境变量覆盖（前缀 ARGUS_）。
@@ -77,6 +78,14 @@ pub struct Config {
     pub depth_model: Option<PathBuf>,
     /// 人体解析模型路径。
     pub human_parsing_model: Option<PathBuf>,
+    /// 文本 Embedding ONNX 模型路径（bge-small-zh-v1.5）。
+    pub text_embedding_model: Option<PathBuf>,
+    /// 文本 Embedding 分词器路径（tokenizer.json）。非 onnx 文件，不进 /models
+    /// 模型清单（ocr_dict 先例），但参与三件套 configured 判定。
+    pub text_embedding_tokenizer: Option<PathBuf>,
+    /// 文本 Embedding 向量维度声明（`ARGUS_TEXT_EMBEDDING_DIM`）。加载期与
+    /// `engine.dim()` 比对，不符即拒载（fail loud，防模型文件被替换成不同维度）。
+    pub text_embedding_dim: Option<usize>,
     /// 每能力预热 dummy 输入尺寸覆盖（`ARGUS_<CAP>_WARMUP_SIZE=WxH`）。
     /// 未设置的能力沿用引擎 `input_size`。背景：OCR 预热在引擎默认的 960×960
     /// 全零 dummy 上为 20.4s/实例（det 对大块零图产出大量伪区域 + rec 批前向），
@@ -128,6 +137,9 @@ impl Default for Config {
             pose_model: None,
             depth_model: None,
             human_parsing_model: None,
+            text_embedding_model: None,
+            text_embedding_tokenizer: None,
+            text_embedding_dim: None,
             warmup_sizes: HashMap::new(),
             pools: HashMap::new(),
             slots_config: None,
@@ -218,6 +230,13 @@ impl Config {
         cfg.pose_model = env_path("ARGUS_POSE_MODEL");
         cfg.depth_model = env_path("ARGUS_DEPTH_MODEL");
         cfg.human_parsing_model = env_path("ARGUS_HUMAN_PARSING_MODEL");
+        cfg.text_embedding_model = env_path("ARGUS_TEXT_EMBEDDING_MODEL");
+        cfg.text_embedding_tokenizer = env_path("ARGUS_TEXT_EMBEDDING_TOKENIZER");
+        if let Ok(v) = env::var("ARGUS_TEXT_EMBEDDING_DIM") {
+            if let Ok(n) = v.parse::<usize>() {
+                cfg.text_embedding_dim = Some(n);
+            }
+        }
 
         for cap in CAPABILITY_KEYS {
             if let Some(size) = env::var(format!("ARGUS_{}_WARMUP_SIZE", cap.to_uppercase()))
@@ -305,6 +324,8 @@ impl Config {
             "pose" => one(&self.pose_model),
             "depth" => one(&self.depth_model),
             "human_parsing" => one(&self.human_parsing_model),
+            // tokenizer 非 onnx：不进清单（ocr_dict 先例），溯源只看模型文件
+            "text_embedding" => one(&self.text_embedding_model),
             _ => Vec::new(),
         }
     }
@@ -328,6 +349,13 @@ impl Config {
         if self.pose_model.is_some() { v.push("pose"); }
         if self.depth_model.is_some() { v.push("depth"); }
         if self.human_parsing_model.is_some() { v.push("human_parsing"); }
+        // 三件套（model+tokenizer+dim）缺一不可：引擎加载必失败，报已配置会误导排错
+        if self.text_embedding_model.is_some()
+            && self.text_embedding_tokenizer.is_some()
+            && self.text_embedding_dim.is_some()
+        {
+            v.push("text_embedding");
+        }
         v
     }
 }
@@ -773,5 +801,70 @@ mod tests {
         unsafe { env::set_var("ARGUS_SLOTS_WATCH_SECS", "0"); }
         assert_eq!(Config::from_env().slots_watch_secs, 0, "0 必须原样保留（关闭 watcher）");
         unsafe { env::remove_var("ARGUS_SLOTS_WATCH_SECS"); }
+    }
+
+    // ---- 文本 Embedding（批 D1：三件套 = model + tokenizer + dim） ----
+
+    #[test]
+    fn from_env_should_parse_text_embedding_triple() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_TEXT_EMBEDDING_MODEL", "/models/bge-small-zh-v1.5/model.onnx");
+            env::set_var("ARGUS_TEXT_EMBEDDING_TOKENIZER", "/models/bge-small-zh-v1.5/tokenizer.json");
+            env::set_var("ARGUS_TEXT_EMBEDDING_DIM", "512");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.text_embedding_model.as_deref(),
+            Some(std::path::Path::new("/models/bge-small-zh-v1.5/model.onnx"))
+        );
+        assert_eq!(
+            config.text_embedding_tokenizer.as_deref(),
+            Some(std::path::Path::new("/models/bge-small-zh-v1.5/tokenizer.json"))
+        );
+        assert_eq!(config.text_embedding_dim, Some(512));
+        assert!(
+            config.configured_engines().contains(&"text_embedding"),
+            "三件套齐备才进 configured_engines"
+        );
+        unsafe {
+            env::remove_var("ARGUS_TEXT_EMBEDDING_MODEL");
+            env::remove_var("ARGUS_TEXT_EMBEDDING_TOKENIZER");
+            env::remove_var("ARGUS_TEXT_EMBEDDING_DIM");
+        }
+    }
+
+    #[test]
+    fn text_embedding_partial_config_should_not_be_configured() {
+        // 三件套缺任一（tokenizer/dim）都不得进入 configured_engines：
+        // 引擎加载必失败，报"已配置"会误导排错（ocr 半套同款语义）
+        let only_model = Config {
+            text_embedding_model: Some("/models/bge/model.onnx".into()),
+            ..Config::default()
+        };
+        assert!(!only_model.configured_engines().contains(&"text_embedding"));
+        let missing_dim = Config {
+            text_embedding_model: Some("/models/bge/model.onnx".into()),
+            text_embedding_tokenizer: Some("/models/bge/tokenizer.json".into()),
+            ..Config::default()
+        };
+        assert!(!missing_dim.configured_engines().contains(&"text_embedding"));
+    }
+
+    #[test]
+    fn from_env_should_accept_text_embedding_in_whitelist() {
+        // 白名单解析以 CAPABILITY_KEYS 为准：新键不在表内会被静默丢弃
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_ENABLED_CAPABILITIES", "text_embedding");
+        }
+        let config = Config::from_env();
+        assert!(
+            config.capability_enabled("text_embedding"),
+            "text_embedding 应是合法白名单键"
+        );
+        unsafe {
+            env::remove_var("ARGUS_ENABLED_CAPABILITIES");
+        }
     }
 }

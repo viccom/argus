@@ -4,6 +4,7 @@ pub mod classification;
 pub mod common;
 pub mod detect_filter;
 pub mod detection;
+pub mod embed;
 pub mod face;
 pub mod health;
 pub mod models;
