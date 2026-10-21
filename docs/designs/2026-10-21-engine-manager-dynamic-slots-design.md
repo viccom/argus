@@ -131,7 +131,10 @@ model=动态槽名
                  → OnceCell 初始化 → 释放信号量
        → 槽级 provenance：ModelInfo { model: "文件名#hash12", pipeline: "detect-slot-v1" }
 
-model=保留字 / 未注册
+model=保留字（15 能力键）
+  └→ 错误信封（HTTP 200 + status=error），data.code="bad_request"，data.error 提示改用对应端点
+
+model=未注册槽名
   └→ 错误信封（HTTP 200 + status=error），data.code="unknown_model"，data.error 列出可用动态槽名（不泄露路径）
 ```
 
@@ -224,7 +227,8 @@ class_names = ["Person", "Hardhat", "NO-Hardhat", "Safety Vest", "NO-Safety Vest
 | 启动时解析/校验失败 | 拒绝启动（fail-closed），日志含槽名与原因 |
 | 运行中重载失败 | 保留 last-known-good，error 日志，不部分应用 |
 | 槽名非法/保留字/路径越界 | 启动拒绝；重载拒绝整份文件 |
-| `model` 未注册/是保留字 | HTTP 200 统一信封 + `status=error`，`data.code="unknown_model"`，`data.error` 列可用动态槽名 |
+| `model` 未注册 | HTTP 200 统一信封 + `status=error`，`data.code="unknown_model"`，`data.error` 列可用动态槽名 |
+| `model` 是保留字（能力键） | HTTP 200 统一信封 + `status=error`，`data.code="bad_request"`，`data.error` 提示改用对应端点 |
 | 模型文件缺失/损坏 | 首次请求构建失败，返回既有错误族（`ModelNotConfigured`/`Internal`），槽保持未加载；30s 内不重试，避免请求风暴 |
 | 白名单不含 detection | `CapabilityDisabled`（与静态 detection 一致） |
 | 热重载与在途请求 | 旧 `Arc<Slot>` 继续服务至请求结束；新请求用新槽 |
@@ -250,7 +254,7 @@ class_names = ["Person", "Hardhat", "NO-Hardhat", "Safety Vest", "NO-Safety Vest
 ## 8. 测试策略
 
 1. **F0 特征测试（重构前）**：锁定静态 3 槽的懒加载、未配置错误、白名单先于文件系统、`pool_for` 回退、溯源缓存、`/models` 15 项、`/health` 形状；抓 golden。2. **F1 Registry 单测（`T=String` 假 builder）**：toml 解析/校验、保留字、重复槽、路径越界、add/remove/change diff、并发只建一份、失败退避、last-known-good。
-3. **F2 路由测试**：`model` 缺省无变化；未注册/保留字错误信封 + code；动态槽推理路径（单元层可 mock 池）；provenance 按槽解析；batch `model` 不再拒绝。
+3. **F2 路由测试**：`model` 缺省无变化；未注册（unknown_model）与保留字（bad_request）错误信封分流；动态槽推理路径（单元层可 mock 池）；provenance 按槽解析；batch `model` 不再拒绝。
 4. **F3 watcher**：mtime+size 变更检测；新增/删除/变更/非法/截断；停机退出。
 5. **F4 E2E（真实模型）**：用现有 `yolov8n.onnx` 注册别名槽 `alias-test`，走“加载→/detect?model=alias-test→溯源→touch slots.toml 改路径→热重载→删除→unknown_model 错误信封”；坏模型退避；静态端点与 golden 逐字段一致。
 6. **门禁**：`cargo test --jobs 6` 全绿 + `cargo clippy --all-targets --jobs 6` 零警告（共享机纪律）。
