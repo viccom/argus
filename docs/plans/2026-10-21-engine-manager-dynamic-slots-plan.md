@@ -1,6 +1,7 @@
 # EngineManager 动态化（检测族命名槽 + 热重载）实施计划
 
 > **执行方式**：逐任务执行（executing-plans 技能）；每任务按"测试先行 → 实现 → 门禁 → 提交"推进，完成即在下方跟踪清单回填状态与验证证据（时点必须写）。
+> **执行状态**：✅ 全部完成（2026-10-21）——T0-T13 逐任务门禁通过并回填；worktree `feat/dynamic-slots` 已 `--no-ff` 合并回 main（merge 提交见文末变更记录），worktree 与分支已清理；生产未激活（实例无 slots.toml，零回归）。
 > **设计权威**：[../designs/2026-10-21-engine-manager-dynamic-slots-design.md](../designs/2026-10-21-engine-manager-dynamic-slots-design.md)（approved，基线 `5b07e63`）。本计划不重述设计论证，只给可执行步骤；与设计冲突处以设计为准并回改本计划。
 
 **Goal:** 检测族新增模型从"改代码 + 发版"退化为"`slots.toml` 加一段 + 热重载"，静态 3 槽与现有契约零回归。
@@ -27,20 +28,20 @@
 
 | # | 任务 | 内容 | 阶段门禁 | 状态 | 验证证据（时点） |
 |---|---|---|---|---|---|
-| T0 | 准备 | 文档批次提交 main + 建 worktree/分支 | 分支就绪、基线测试全绿 | ⬜ | |
-| T1 | F0 特征测试 | 静态路径特征单测 + `/models` `/health` golden 锁定 | 现有测试基线全绿；golden 断言通过 | ⬜ | |
-| T2 | F0 E2E golden | 真实模型实例抓 6 端点 golden 入库 | golden 6 文件入库且非空 | ⬜ | |
-| T3 | F1 解析校验 | `toml` 依赖 + `slots.rs` 解析/校验/路径边界 | 解析单测先红后绿 | ⬜ | |
-| T4 | F1 错误码与配置 | `UnknownModel` 错误码 + `ARGUS_SLOTS_*` | 单测 + clippy 零警告 | ⬜ | |
-| T5 | F1 注册表核心 | `Slot<T>`/`SlotRegistry<T>` 懒加载/并发单建/退避 | 并发/退避单测通过 | ⬜ | |
-| T6 | F1 热重载 diff | `apply_specs` diff + 文件指纹 + `reload_once` | diff/last-known-good 单测通过 | ⬜ | |
-| T7 | F2 引擎接线 | EngineManager 字段/build 闭包/动态槽解析与深检 | clippy 零警告；编译通过 | ⬜ | |
-| T8 | F2 路由 model 参数 | 三端点 + batch 可选 `model`；静态路径零改动 | 路由测试通过；batch 旧拒绝测试按新语义重写 | ⬜ | |
-| T9 | F2 观测字段 | `/models` `dynamic_slots` + `/health` deep 动态字段 | 字段单测通过 | ⬜ | |
-| T10 | F3 watcher 装配 | main 启动 fail-closed + `watch_loop` | 手动冒烟：touch 生效 ≤2 周期 | ⬜ | |
-| T11 | F3 lifecycle | 非法 slots 拒启 + SIGTERM watcher 干净退出 | lifecycle 测试通过 | ⬜ | |
-| T12 | F4 E2E | 真实模型动态槽全流程 + golden 逐字段复比 | 设计 §10 验收 1-8 全过 | ⬜ | |
-| T13 | 文档与收尾 | README/example/计划表回填 + 合并 main + 全量门禁 | 全量 test+clippy 绿；合并完成 | ⬜ | |
+| T0 | 准备 | 文档批次提交 main + 建 worktree/分支 | 分支就绪、基线测试全绿 | ✅ | main `481ede6`（docs 批次）+ worktree `feat/dynamic-slots`；基线 `5b07e63`+docs 全绿（2026-10-21 上午，worktree 首次编译） |
+| T1 | F0 特征测试 | 静态路径特征单测 + `/models` `/health` golden 锁定 | 现有测试基线全绿；golden 断言通过 | ✅ | `769b253`（12:21）：+6 特征/golden 单测，clippy 0 |
+| T2 | F0 E2E golden | 真实模型实例抓 6 端点 golden 入库 | golden 6 文件入库且非空 | ✅ | `705591f`（12:40）：:7049 临时实例抓 6 文件，`yolov8n.onnx#<hash12>` 校验通过 |
+| T3 | F1 解析校验 | `toml` 依赖 + `slots.rs` 解析/校验/路径边界 | 解析单测先红后绿 | ✅ | `e7182c4`（12:45）：8 个解析单测（含符号链接逃逸/取值域/截断拒绝） |
+| T4 | F1 错误码与配置 | `UnknownModel` 错误码 + `ARGUS_SLOTS_*` | 单测 + clippy 零警告 | ✅ | `c7c1a7f`（13:03）+ 设计勘误 `a15b363`；config/error 单测全绿 |
+| T5 | F1 注册表核心 | `Slot<T>`/`SlotRegistry<T>` 懒加载/并发单建/退避 | 并发/退避单测通过 | ✅ | `2e2c27a`（13:17）：8 并发首请求只构建 1 次；退避窗口内 0 重试、过期 1 次 |
+| T6 | F1 热重载 diff | `apply_specs` diff + 文件指纹 + `reload_once` | diff/last-known-good 单测通过 | ✅ | `6bec15e`（13:47）：同规格重放不重建、变更换新槽旧 Arc 仍服务、坏文件保留 last-known-good、文件消失清空 |
+| T7 | F2 引擎接线 | EngineManager 字段/build 闭包/动态槽解析与深检 | clippy 零警告；编译通过 | ✅ | `6bba5f8`（14:06）+ 设计勘误 `439b773`（保留字分流）；clippy 0 |
+| T8 | F2 路由 model 参数 | 三端点 + batch 可选 `model`；静态路径零改动 | 路由测试通过；batch 旧拒绝测试按新语义重写 | ✅ | `3420f8a`（14:34）：detection/scene/batch 路由测试全绿（含空 model 回落静态） |
+| T9 | F2 观测字段 | `/models` `dynamic_slots` + `/health` deep 动态字段 | 字段单测通过 | ✅ | `3059c26`（15:00）：全信封 golden 同步 `dynamic_slots:{}`（"只加不改"契约）；浅检无 dynamic 字段 |
+| T10 | F3 watcher 装配 | main 启动 fail-closed + `watch_loop` | 手动冒烟：touch 生效 ≤2 周期 | ✅ | `03b09a2`（15:25）：watch=1s 冒烟，热加槽后 `/models` 出现两个槽 |
+| T11 | F3 lifecycle | 非法 slots 拒启 + SIGTERM watcher 干净退出 | lifecycle 测试通过 | ✅ | `ee08e36`（17:02）：`--test lifecycle` 3 个测试全过（6.00s） |
+| T12 | F4 E2E | 真实模型动态槽全流程 + golden 逐字段复比 | 设计 §10 验收 1-8 全过 | ✅ | 15:00-17:00 真实模型 :7049 全流程：溯源 `detect-slot-v1`、热增删 unknown_model、坏模型只构建 1 次；golden 6 端点复比 2 处 diff 经独立对照实验定性为懒加载时序偏差（零推理复比逐字节一致）；golden mask 修正 `c686489`。**验收 1-10 全过**（含 T11 覆盖的 9 与各任务门禁覆盖的 10） |
+| T13 | 文档与收尾 | README/example/计划表回填 + 合并 main + 全量门禁 | 全量 test+clippy 绿；合并完成 | ✅ | 本任务：`slots.example.toml` + README 动态槽小节/env 两行/golden 约定 + 三计划表回填；worktree 最终门禁 `cargo test --jobs 6` 258 全绿（255 lib + 3 lifecycle）、clippy 0；合并 main 提交 `<merge-sha>`，main 复验 258 全绿（2026-10-21 晚） |
 
 ---
 
@@ -2184,3 +2185,5 @@ git worktree remove ../argus-dynamic-slots && git branch -d feat/dynamic-slots
 ## 变更记录
 
 - 2026-10-21：初版（writing-plans 产出）。13 任务对齐设计 F0-F4 五阶段与 C1-C8 修正；任务粒度按"测试先行 → 实现 → 门禁 → 提交"。
+- 2026-10-21（执行期）：`a15b363`（T4 审查）统一 unknown_model/保留字错误为信封表述并回改设计；`439b773`（T7 审查）保留字与未注册错误码分流勘误回改设计；`c686489`（T9 审查）T12 health golden 掩码剔除 dynamic 新字段，防验收假失败。
+- 2026-10-21（收尾，T13）：`slots.example.toml` 入库；README 增 `ARGUS_SLOTS_CONFIG`/`ARGUS_SLOTS_WATCH_SECS` 两行、「动态检测槽（slots.toml）」小节与 E2E golden 复比约定；吸收计划阶段 2 状态 ⬜→✅（含与初稿形态差异注记）；engine-exposure 批 1.6 加"动态槽底座已就绪"备注；docs/README 索引状态同步；本清单 T0-T13 全部回填。worktree 最终门禁：`cargo test --jobs 6` 258 全绿（255 lib + 3 lifecycle，2026-10-21 晚）、`cargo clippy --all-targets --jobs 6` 0 警告。合并：`git merge --no-ff feat/dynamic-slots`（main，merge 提交哈希见下），main 复验 258 全绿；worktree 与分支清理完成。**未推送远程**（用户指令）。

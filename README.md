@@ -44,7 +44,29 @@
 | `target_classes` | JSON 整数数组 `[0, 2, 5]`（class_id，非空） | 仅保留这些类别 |
 | `roi` | JSON 归一化多边形 `[[x,y],...]`，≥3 点，坐标 ∈ [0,1] | 仅保留 **bbox 中心点**落在多边形内的检测（射线法，支持凹多边形） |
 
-`/detect/batch` 的 `model` 参数在动态模型管理（吸收计划阶段 2）落地前传入即拒绝，不静默忽略。NMS IoU 全局固定 0.45（NMS 在引擎内完成，不做每请求覆盖）。
+`/detect/batch` 的 `model` 参数可选：命名动态槽（slots.toml 注册，见下节），缺省用预置 detection 槽。NMS IoU 全局固定 0.45（NMS 在引擎内完成，不做每请求覆盖）。
+
+### 动态检测槽（slots.toml）
+
+检测族新增模型从"改代码 + 发版"退化为"`slots.toml` 加一段 + 热重载"（2026-10-21 上线，吸收计划阶段 2）。示例见仓库根 [slots.example.toml](slots.example.toml)，校验规则见 `docs/designs/2026-10-21-engine-manager-dynamic-slots-design.md` §4.4。
+
+```toml
+[slots.crack]                       # 槽名：^[a-z][a-z0-9_]{0,31}$，不得与 15 个能力键重名
+model = "yolov8n-crack.onnx"        # 相对 $ARGUS_MODELS_DIR；绝对路径也必须落在该目录内
+class_names = ["crack", "pothole"]  # 可选：覆盖模型 metadata 类名（自训模型常缺 metadata）
+pool_size = 1                       # 可选：缺省取 ARGUS_ENGINE_POOL，范围 1..=64
+warmup_size = [640, 640]            # 可选：预热 dummy 尺寸，两维均 32..=4096
+```
+
+- **用法**：三个检测端点（`/detect`、`/ppe`、`/fire-smoke`）的 multipart 文本字段 `model=<槽名>`，batch 的 JSON 字段 `model`。缺省/空串走原静态路径，行为逐字节不变。响应溯源为 `data.model`（`文件名#sha256前12位`）+ `data.pipeline = "detect-slot-v1"`。
+  ```bash
+  curl -s -X POST localhost:7042/detect -H "X-API-Key: $KEY" -F "file=@bus.jpg" -F "model=crack" | jq '.data | {model, pipeline, count}'
+  ```
+- **错误码**：`model` 指向未注册/已删除槽 → `unknown_model`（信封内列可用槽名，不泄露路径）；`model` 传静态能力键（如 `ppe`）→ `bad_request`（提示改用对应端点，不跨端点转发）。启动时 `slots.toml` 非法 → **拒绝启动**（fail-closed）。
+- **热重载**：watcher 轮询 `slots.toml` 指纹（mtime 纳秒 + size），默认 3s 周期，新增/修改/删除槽 ≤2 个周期生效；解析失败保留 last-known-good（不清空）。**换模型文件必须原子替换**（临时文件 + `mv`）后 `touch slots.toml`——同路径原地改写 slots.toml 不触发重载。
+- **观测**：`/models` 的 `data.dynamic_slots.<name>.{configured,loaded,model_file,pipeline}`（15 项 `capabilities` 不变）；`/health?deep=true` 的 `dynamic_engines` + `dynamic_slot_health`（`engines`/`engine_health` 不变）。槽懒加载：首次请求才构建引擎，`loaded=false` 表示已注册未加载。
+- **回滚**：删 `slots.toml`（或 `ARGUS_SLOTS_CONFIG` 指向不存在的路径）即清空动态槽，静态能力不受影响；二进制回滚到 2026-10-21 以前则 `slots.toml` 被忽略（新字段不被旧代码读取）。
+- **生产提示**：`slots.toml` 默认落在 gitignore 的 `models/` 下（部署数据）。双实例（:7042/:7043）各自懒加载同一槽会双份内存——峰值由懒加载 + 替换不预载最小化，但同槽双加载仍须计入预算。**当前生产未激活**（无 slots.toml，零回归）；激活前需先在两个实例的 models 目录部署 slots.toml 并评估内存。
 
 ## 构建与运行
 
@@ -53,6 +75,8 @@ cargo build --release --jobs 6
 ```
 
 运行时需 ORT 动态库（`load-dynamic`）与模型文件，环境变量见下。
+
+> **E2E golden 复比约定**：`tests/golden/` 的静态端点基线复比**须在零推理时刻进行**（或 diff 前 mask 掉 `loaded`/`engines`/`engine_health` 等懒加载运行态字段）：懒加载后首次推理会翻转这些字段，产生与契约无关的假 diff（T12 对照实证，2026-10-21）。
 
 版本标识由 build.rs 编译期探测注入（git hash + dirty 标记），见 `/health` 的 `version` 字段。build.rs 监听 git 目录的 `HEAD` + `refs/`：新提交后直接 `cargo build` 即更新版本串，无需手动 touch。
 `SIGTERM`/`Ctrl+C` 触发优雅停机：等待在途请求完成后退出（`ARGUS_SHUTDOWN_TIMEOUT_SECS` 超时保底强退，默认 10s）。
@@ -82,6 +106,8 @@ cargo build --release --jobs 6
 | `ARGUS_SHUTDOWN_TIMEOUT_SECS` | 10 | 优雅停机超时：SIGTERM 后等待在途请求的上限，超时强退。需覆盖最长推理（SAHI/depth ~1.5s，池化排队翻倍） |
 | `ARGUS_GPU_MEM_LIMIT_MB` | 0 | CUDA EP 显存上限（MB）。>0 时设置 ORT arena `with_memory_limit`，防 arena 无限膨胀导致 cuBLAS OOM 后永久失败（僵尸态）。0 = 不限（ORT 默认） |
 | `ARGUS_ACQUIRE_TIMEOUT_MS` | 30000 | 推理排队等待超时（ms）。全忙时请求等待引擎池 permit 的上限，超时返回 503。**0 = fail-fast**：不排队，全忙立即 503 |
+| `ARGUS_SLOTS_CONFIG` | 未设置 = `$ARGUS_MODELS_DIR/slots.toml` | 检测族动态槽清单（slots.toml）显式路径覆盖。文件缺失 = 无动态槽（零回归）；文件非法 → 拒绝启动（fail-closed）。部署数据默认落 gitignore 的 models/，入库示例见仓库根 `slots.example.toml` |
+| `ARGUS_SLOTS_WATCH_SECS` | 3 | slots.toml 热重载轮询周期（秒）。0 = 关闭 watcher（仅启动时加载一次）。新增/修改/删除槽 ≤2 个周期生效；同路径原地改写文件不触发（指纹 = mtime 纳秒 + size），换模型文件须原子替换后 touch slots.toml |
 | `ARGUS_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `PPE` / `FIRE_SMOKE` / `CLASSIFICATION` / `OBB` / `SEGMENTATION` / `FACE_DET` / `FACE_REC` / `REID` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING`）。**命名差异**：模型路径 env 是历史缩写（`FACE_DET`/`FACE_REC`/`PLATE_DET`），新增的按能力 env（`<CAP>_POOL`/`<CAP>_WARMUP_SIZE` 等）一律用规范能力键大写（`FACE_DETECTION`/`FACE_RECOGNITION`/`LICENSE_PLATE`/`FIRE_SMOKE`），与 `/models` 的能力名一致，不引入第三套命名 |
 
 ## 模型下载

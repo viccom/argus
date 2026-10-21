@@ -1,0 +1,13 @@
+# 检测族动态槽示例。复制到 $ARGUS_MODELS_DIR/slots.toml（或任意路径 + ARGUS_SLOTS_CONFIG 指向它）。
+# 字段与校验规则见 docs/designs/2026-10-21-engine-manager-dynamic-slots-design.md §4.4。
+# 换模型文件的约定：原子替换（临时文件 + mv）后 touch 本文件——同路径原地改写不触发重载。
+
+[slots.crack]
+model = "yolov8n-crack.onnx"          # 相对 ARGUS_MODELS_DIR；绝对路径也必须落在该目录内
+class_names = ["crack", "pothole"]     # 可选：覆盖模型 metadata 的类名（自训模型常缺 metadata）
+pool_size = 1                          # 可选：缺省取 ARGUS_ENGINE_POOL，范围 1..=64
+warmup_size = [640, 640]               # 可选：预热 dummy 尺寸，两维均 32..=4096
+
+[slots.ppe_sh17]
+model = "ppe_sh17_v3.onnx"
+class_names = ["Person", "Hardhat", "NO-Hardhat", "Safety Vest", "NO-Safety Vest"]

@@ -113,7 +113,8 @@
 - TDD:config 解析/timeout=0 行为/dummy 预热失败不阻断;CPU 路径零回归(85 测试)。
 - **关键细节必须带上**:arena 只增不减注释、2.9GB/Session 实测数、fail-fast 与 pool_size 对齐建议、1.26.0 ORT 匹配说明。
 
-### 阶段 2:EngineManager 动态化(缺口 D,~1-2 天,与 P2 重构合并) — ⬜ 待开始
+### 阶段 2:EngineManager 动态化(缺口 D,~1-2 天,与 P2 重构合并) — ✅ 完成(2026-10-21)
+- **实施形态与初稿的差异**(详见 [plans/2026-10-21-engine-manager-dynamic-slots-plan.md](plans/2026-10-21-engine-manager-dynamic-slots-plan.md) 与设计):结构未改成 DashMap/DynEngine——静态 15 槽 OnceCell 一律不动,**新增纯增量 `slots.rs` 动态槽 registry**(设计 C1,零回归);注册方式不是目录扫描而是**显式清单 `slots.toml`**(显式配置可评审/可回滚,半写入风险由 last-known-good 兜底);路由是三个检测端点与 `/detect/batch` 的**可选 `model` 参数**(缺省走静态路径,逐字节不变),未做 `/detect/{model}` 路径;`models.toml` 未引入(覆盖项收敛为槽的 `class_names`/`pool_size`/`warmup_size` 三项);卸载靠"删槽 + 在途请求持 Arc 自然释放",未做 `POST /models/{name}/unload` 端点。
 - 结构:`OnceCell<固定字段>` → `DashMap<String, Arc<EnginePool<DynEngine>>>`;name→引擎类型由**目录+能力注册表**解析(见下);
 - 模型目录约定:`models/` 下按能力子目录(`detect/`、`classify/`、`pose/`…),文件名即模型名;`POST /models/{name}/unload` 幂等卸载(进行中推理持 Arc 自然释放);
 - **路径校验照抄 yolo-rs**(拒绝 `..`/`/`/`\`/`\0`/空);
@@ -122,7 +123,7 @@
 - 兼容:保留现有 env 显式路径配置作为"预置能力"(启动即注册),目录扫描作为"动态能力";/health 的 configured/loaded 语义随之扩展;
 - 路由变化:`/detect` 支持可选 `model` 参数(缺省用预置);或 `/detect/{model}`(与现有 /detect 并存,REST 风格对齐批 1 模板);
 - 风险:动核心结构,先补 EngineManager 现有行为的特征测试再重构;warden 托管下灰度。
-- **这是唯一"重构"级阶段,放在批 1 收尾后。**
+- **这是唯一"重构"级阶段,放在批 1 收尾后。**(2026-10-21 已完成;后续新能力槽不再动核心结构——批 1.6 场景槽接入退化为 slots.toml 配置项。)
 
 ### 阶段 3:HTTP 参数层(缺口 E+F+G,~1 天) — ✅ 完成
 
@@ -169,7 +170,7 @@
 |---|---|---|---|
 | 0 fork rust-onnx-infer | ✅ | fork viccom/rust-onnx-infer(public,origin=fork/upstream=javpower);推送本地 2 提交(8158cf0..0156c8d);argus Cargo.toml path→git 依赖(锁定 commit 0156c8d5);README 依赖说明改写;`cargo build --jobs 6` 通过;`cargo test --jobs 6` 84+1 全绿;warden 重启后 bus.jpg 替代图检出逐位一致(7 框 5bird+2sheep,bbox/confidence 全同,仅 inference_ms 271→286 首次加载波动) | 2026-09-10 |
 | 1 GPU 硬化(显存上限/预热/深检/背压可配) | ✅ | **缺口 A**:rust-onnx-infer 加进程级 `GLOBAL_GPU_MEM_LIMIT_MB: AtomicUsize` + `set_global_gpu_mem_limit()`,`add_cuda_ep` 在 >0 时调 `CUDA::with_memory_limit(mb*1024*1024)`(已 push fork commit e9a5900);argus `main.rs` 启动时 `ARGUS_GPU_MEM_LIMIT_MB>0` 即 override。**缺口 B**:`EnginePool::warmup()` 对每实例跑 dummy 推理(失败 warn 不阻断,与 yolo-rs 同款);`EngineManager::deep_health_check()` 对已加载引擎池实例 0 发 dummy 推理检测僵尸态(arena OOM 后 cuBLAS 永久失败);`/health?deep=true` 返回 `engine_health` 数组。**缺口 C**:`Config` 加 `acquire_timeout_ms`(默认 30000,0=fail-fast);`acquire_permit` 从 config 读超时,0 时 `try_acquire_owned()`。验证:`cargo build --jobs 6` 零警告;`cargo clippy --all-targets --jobs 6` 零警告;`cargo test --jobs 6` 89+1 全绿(config 5 新测试覆盖 gpu_mem_limit/acquire_timeout/fail-fast);rust-onnx-infer 95 测试全绿。 | 2026-09-10 |
-| 2 EngineManager 动态化(与 P2 重构合并,**批 1 收尾后才开始**) | ⬜ | | |
+| 2 EngineManager 动态化(与 P2 重构合并,**批 1 收尾后才开始**) | ✅ | 完成(2026-10-21):纯增量 `src/slots.rs`(`SlotRegistry<T>` 懒加载/并发单建/失败退避/热重载 diff),静态 15 槽 OnceCell 零改动(设计 C1);`slots.toml` 显式清单 + `ARGUS_SLOTS_CONFIG`/`ARGUS_SLOTS_WATCH_SECS`;三检测端点与 `/detect/batch` 可选 `model` 参数;`unknown_model`/`bad_request` 错误码;启动 fail-closed(非法配置拒启);`/models` 增 `dynamic_slots`、`/health?deep=true` 增 `dynamic_engines`/`dynamic_slot_health`(均"只加不改")。验证:`cargo test --jobs 6` **258 全绿**(基线 121+1→258;slots 单测覆盖解析校验/路径边界/并发单建/退避/diff/last-known-good,lifecycle 2 个进程级测试);`cargo clippy --all-targets --jobs 6` 零警告;T12 真实模型 E2E 设计 §10 验收 1-10 全过(动态槽推理溯源 `detect-slot-v1`、热增删 ≤2 周期、坏模型退避只构建一次、golden 6 端点复比——2 处 diff 经独立对照实验定性为懒加载时序偏差非契约漂移,零推理复比与 golden 逐字节一致)。文档:README 动态槽小节 + `slots.example.toml`。**生产未激活**(实例无 slots.toml 即零回归)。 | 2026-10-21 |
 | 3 HTTP 参数层(confidence 后过滤/batch/ROI) | ✅ | **顺序说明**:阶段 2 被批 1(任务 2-4 模型待获取,网络受限)硬前置卡住,按计划"0→1 可立即开始;2 必须等批 1"跳到阶段 3;`/detect/batch` 的 `model?` 依赖阶段 2,传入即拒绝(不静默忽略)。**缺口 E**:引擎构造阈值 0.25→`DETECTION_CONFIDENCE_FLOOR`=0.10(编译期 `const _: () = assert!` 锁定 ≥ `SahiConfig::LOW_MODEL_CONFIDENCE`,否则 SAHI postprocess 静默切 NMS/IOU);请求 `confidence` 默认 0.25(`DEFAULT_CONFIDENCE`,旧行为逐位等价),范围 [0.1,1.0] 越界 400;**SAHI 交互风险消除**:rust-onnx-infer fork 加 `SahiConfig.min_confidence`(commit 0c783f3),`collect_predictions` 合并前过滤,LOW_MODEL_CONFIDENCE 判断改用有效阈值 max(引擎,min_confidence)——与引擎直接以该阈值构造严格等价,不再是"低"风险而是数学等价(2 个 mock 测试锁定:低分大框合并前丢弃 union 90→50;有效阈值 0.3 保持 GREEDYNMM)。**缺口 G**:`routes/detect_filter.rs`——`Polygon`(JSON `[[x,y],...]`,≥3 点/坐标 [0,1] 越界 400,射线法含凹多边形测试)+ `target_classes`(JSON class_id 数组,空数组 400)+ `DetectFilter::apply`(bbox 中心归一化判定,与 yolo-rs 同款)。**缺口 F**:`routes/batch.rs`——JSON `image_paths`(服务端本地路径)逐图循环,每图独立 `acquire_permit`,**错误隔离**(yolo-rs 是 `?` 炸整批),JSON 解析失败走 HTTP 200 信封而非 axum 4xx 纯文本;模型未配置属整批级错误。**E2E 踩坑 1 条**:`DETECTION_CONFIDENCE_FLOOR as f64`=0.10000000149…,用户输入 `0.10` 被判越界——改为 f32 精度比较,回归测试 `filter_should_accept_user_literal_at_floor`。验证:`cargo clippy --all-targets --jobs 6` 零警告;`cargo test --jobs 6` **121+1 全绿**(89→121:+21 filter/+6 batch/+5 detection,health 反向断言翻转为正向);rust-onnx-infer lib 97 全绿(`new_engines_smoke` 10 失败为 `testmodels/` 缺文件,stash 对照确认预先存在);**warden 重启后 E2E**:`/detect` 默认 7 框与旧构建基线 `diff` 逐位一致,`sahi=true` 11 框/6 片逐位一致;`confidence=0.5`→3 bird、`=0.10`→12 框(min 0.146)、`=0.05`→整洁 400;`target_classes=[18]`→2 sheep;`roi` 左半→cx 236/427;三参数组合正确;SAHI+0.7→6 框与基线 ≥0.7 子集一致;`/detect/batch` 4 图(2 正常+不存在路径+`/etc/hostname`)→`succeeded 2/failed 2`,错误条目带原因,服务日志 WARN 留痕,正常图结果与单图端点一致。 | 2026-09-10 |
 | 4 A100 对标压测(yhpc,基线 500 QPS) | ⬜ | | |
 | 5 safe-bot 消费方改造 | ⬜ | | |
