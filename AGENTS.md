@@ -19,8 +19,9 @@ E2E 冒烟需运行中的实例与真实模型；模型不入库（.gitignore �
 
 | 位置 | 职责 |
 |---|---|
-| src/config.rs | env 驱动配置；`CAPABILITY_KEYS` 为能力键唯一权威源（/models、EngineManager、白名单共用） |
-| src/engine.rs | EngineManager（tokio::OnceCell 懒加载）+ EnginePool（信号量准入 + round-robin）+ 预热/深检 |
+| src/config.rs | env 驱动配置；`CAPABILITY_KEYS` 为能力键唯一权威源（/models、EngineManager、白名单、动态槽保留字共用） |
+| src/engine.rs | EngineManager（tokio::OnceCell 懒加载）+ EnginePool（信号量准入 + round-robin）+ 预热/深检；动态槽装配与解析入口（静态 15 槽 OnceCell 与动态槽 registry 严格分置） |
+| src/slots.rs | 检测族动态槽（slots.toml 显式清单）：解析校验（槽名/保留字/路径边界）/SlotRegistry 懒加载（构建互斥 + 失败退避）/热重载 diff（指纹 + last-known-good）/watcher。设计见 docs/designs/2026-10-21-engine-manager-dynamic-slots-design.md |
 | src/routes/*.rs | 每能力一个路由文件；公共工具在 routes/common.rs；检测族共享 detection.rs::run_detect |
 | src/error.rs / auth.rs / main.rs / build.rs | 错误信封 / API key 中间件（常数时间比较）/ 优雅停机 / git hash 版本注入 |
 | web/index.html · deploy/docker · tests/lifecycle.rs | 内嵌控制台 / GPU 镜像 / 停机超时回归 |
@@ -43,10 +44,13 @@ E2E 冒烟需运行中的实例与真实模型；模型不入库（.gitignore �
 
 路由范式照抄 routes/classification.rs（DTO+From / parse_*_multipart / handler / oneshot 测试组）；同族检测能力加 `DetectCap` 枚举复用 run_detect，不复制实现。
 
+**检测族新模型优先走动态槽**（2026-10-21 底座就绪）：模型过前置门后，`slots.toml` 加一段 + 热重载即上线（`model=<槽名>` 参数消费），无需新路由代码——批 1.6 场景槽均按此形态；仅非检测族或需要新契约形态的能力才走上面的三道门代码接入。已加载槽换模型须改 spec（换路径）或重启，同路径 touch 不生效（README 动态槽节）。
+
 ## 测试约定
 
-- 路由测试：`build_router(test_state(), None)` + tower `ServiceExt::oneshot`，multipart 手工构造 1×1 PNG；
-- 集成：tests/lifecycle.rs 守护"停机超时只从收到信号起算"（曾误写为从启动起算导致服务周期性自杀）；
+- 路由测试：`build_router(test_state(), None)` + tower `ServiceExt::oneshot`，multipart 手工构造 1×1 PNG；slots 模块用 `T=String` 假 builder 覆盖并发/退避/diff（不依赖模型文件）；
+- 集成：tests/lifecycle.rs 守护"停机超时只从收到信号起算"（曾误写为从启动起算导致服务周期性自杀）+ 动态槽两测试（非法 slots.toml 拒启动、SIGTERM 后 watcher 干净退出）；
+- golden：tests/golden/ 存 6 个静态端点 E2E 基线（解析后 JSON 剔易变字段）；复比须零推理时刻或 mask `loaded`/`engines`/`engine_health`/dynamic 新字段（懒加载运行态，约定见 README）；
 - 完成定义：cargo test 全绿 + clippy 零警告 + 新端点 E2E 冒烟，三绿缺一不可提交。
 
 ## rust-onnx-infer 依赖流（git 依赖，Cargo.lock 锁 commit）
