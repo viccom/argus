@@ -16,7 +16,7 @@ use std::time::Duration;
 use rust_onnx_infer::DeviceType;
 use tokio::sync::OnceCell;
 
-use crate::config::CAPABILITY_KEYS;
+use crate::config::{CAPABILITY_KEYS, Config};
 use crate::engine::{sha256_prefix_12, EnginePool, ModelInfo};
 use crate::error::AppError;
 
@@ -391,6 +391,58 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
     }
 }
 
+/// 文件指纹：mtime 纳秒 + size。同名同 size 但 mtime 变化（touch）也触发重读。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileFingerprint {
+    pub mtime_ns: u128,
+    pub size: u64,
+}
+
+pub fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    Some(FileFingerprint {
+        mtime_ns: mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos(),
+        size: meta.len(),
+    })
+}
+
+/// 热重载单轮：指纹变化才读取解析；解析失败保留 last-known-good（不部分应用，
+/// 但指纹仍前进——避免每周期对同一份坏文件重复解析刷屏）；文件消失清空动态槽。
+pub fn reload_once<T: Send + Sync + 'static>(
+    registry: &SlotRegistry<T>,
+    config: &Config,
+    last_fp: &mut Option<FileFingerprint>,
+) {
+    let path = config.slots_path();
+    let fp = file_fingerprint(&path);
+    if fp == *last_fp {
+        return;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match parse_slots_toml(&text, &config.models_dir) {
+            Ok(specs) => {
+                tracing::info!("slots.toml 重载成功: {} 个动态槽", specs.len());
+                registry.apply_specs(specs);
+                *last_fp = fp;
+            }
+            Err(e) => {
+                tracing::error!("slots.toml 重载失败(保留旧配置): {e}");
+                *last_fp = fp;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("slots.toml 已移除: 清空动态槽(静态能力不受影响)");
+            registry.apply_specs(Vec::new());
+            *last_fp = None;
+        },
+        Err(e) => {
+            tracing::error!("slots.toml 读取失败(保留旧配置): {e}");
+            *last_fp = fp;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +450,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::config::Config;
     use crate::engine::EnginePool;
     use crate::error::AppError;
 
@@ -674,5 +727,120 @@ mod tests {
         let mi = slot.model_info().await.expect("文件存在应可解析");
         assert!(mi.model.starts_with("m.onnx#") && mi.model.len() == "m.onnx#".len() + 12, "实际: {}", mi.model);
         assert_eq!(mi.pipeline, SLOT_PIPELINE);
+    }
+
+    // ---- 热重载 diff 与 reload_once（last-known-good 语义） ----
+
+    #[tokio::test]
+    async fn unchanged_spec_should_keep_loaded_pool() {
+        let dir = tmp_models("diff-keep");
+        let (count, build) = counting_builder();
+        let registry = SlotRegistry::new(rust_onnx_infer::DeviceType::from_name("cpu"), build);
+        let spec = one_spec(&dir, "keep");
+        registry.apply_specs(vec![spec.clone()]);
+        registry.resolve("keep").await.expect("首次加载");
+        // 同规格重放：不替换槽、不重建池
+        registry.apply_specs(vec![spec]);
+        registry.resolve("keep").await.expect("重放后仍可用");
+        assert_eq!(count.load(Ordering::SeqCst), 1, "同规格重放不得重建");
+    }
+
+    #[tokio::test]
+    async fn changed_spec_should_replace_slot_and_old_arc_still_works() {
+        let dir = tmp_models("diff-replace");
+        let (_c, build) = counting_builder();
+        let registry = SlotRegistry::new(rust_onnx_infer::DeviceType::from_name("cpu"), build);
+        registry.apply_specs(vec![one_spec(&dir, "rep")]);
+        let (old_slot, old_pool) = registry.resolve("rep").await.expect("v1 加载");
+
+        let v2 = parse_slots_toml(
+            "[slots.rep]\nmodel = \"m.onnx\"\nclass_names = [\"a\"]\n", &dir,
+        ).unwrap().pop().unwrap();
+        registry.apply_specs(vec![v2]);
+        // 新槽未加载；旧 Arc 仍可用（在途请求语义）
+        let new_slot = registry.slot("rep").unwrap();
+        assert!(!new_slot.loaded(), "变更后应为未加载新槽");
+        assert!(old_slot.loaded(), "旧槽引用视角仍是已加载");
+        let v = old_pool.run(|e| Ok::<_, rust_onnx_infer::VisionError>(e.clone())).await.unwrap();
+        assert_eq!(v, "rep", "旧池必须继续服务");
+    }
+
+    #[tokio::test]
+    async fn vanished_spec_should_remove_slot() {
+        let dir = tmp_models("diff-rm");
+        let (_c, build) = counting_builder();
+        let registry = SlotRegistry::new(rust_onnx_infer::DeviceType::from_name("cpu"), build);
+        registry.apply_specs(vec![one_spec(&dir, "a"), one_spec(&dir, "b")]);
+        registry.apply_specs(vec![one_spec(&dir, "b")]);
+        assert!(registry.slot("a").is_none());
+        assert!(registry.slot("b").is_some());
+    }
+
+    fn config_with_slots(dir: &Path, text: &str) -> (Config, PathBuf) {
+        let slots_path = dir.join("slots.toml");
+        std::fs::write(&slots_path, text).unwrap();
+        let config = Config {
+            models_dir: dir.to_path_buf(),
+            ..Config::default()
+        };
+        (config, slots_path)
+    }
+
+    #[tokio::test]
+    async fn reload_once_should_apply_change_reject_bad_and_clear_on_missing() {
+        let dir = tmp_models("reload");
+        let (_c, build) = counting_builder();
+        let registry = SlotRegistry::new(rust_onnx_infer::DeviceType::from_name("cpu"), build);
+        let (config, slots_path) = config_with_slots(&dir, "[slots.a]\nmodel = \"m.onnx\"\n");
+        let mut fp = None;
+        reload_once(&registry, &config, &mut fp);
+        assert!(registry.slot("a").is_some(), "首次应加载槽");
+
+        // 坏内容：保留 last-known-good
+        std::fs::write(&slots_path, "[slots.'X']\nmodel").unwrap();
+        reload_once(&registry, &config, &mut fp);
+        assert!(registry.slot("a").is_some(), "解析失败必须保留旧槽");
+        // 截断同样保留
+        std::fs::write(&slots_path, "[slots.a\nmod").unwrap();
+        reload_once(&registry, &config, &mut fp);
+        assert!(registry.slot("a").is_some());
+
+        // 合法变更：换名生效
+        std::fs::write(&slots_path, "[slots.b]\nmodel = \"m.onnx\"\n").unwrap();
+        reload_once(&registry, &config, &mut fp);
+        assert!(registry.slot("a").is_none() && registry.slot("b").is_some());
+
+        // 文件消失：清空动态槽
+        std::fs::remove_file(&slots_path).unwrap();
+        reload_once(&registry, &config, &mut fp);
+        assert!(registry.slot("b").is_none(), "文件消失应清空动态槽");
+    }
+
+    #[tokio::test]
+    async fn reload_once_should_skip_when_fingerprint_unchanged() {
+        let dir = tmp_models("reload-fp");
+        let (count, build) = counting_builder();
+        let registry = SlotRegistry::new(rust_onnx_infer::DeviceType::from_name("cpu"), build);
+        let (config, _p) = config_with_slots(&dir, "[slots.a]\nmodel = \"m.onnx\"\n");
+        let mut fp = None;
+        reload_once(&registry, &config, &mut fp);
+        assert!(registry.slot("a").is_some());
+        // 指纹不变（未修改文件）：二次调用必须是 no-op（不读文件、不重放）
+        let fp_before = fp;
+        reload_once(&registry, &config, &mut fp);
+        assert_eq!(fp, fp_before, "指纹不变不得重读");
+        assert_eq!(count.load(Ordering::SeqCst), 0, "diff 未变不触发构建");
+    }
+
+    #[test]
+    fn file_fingerprint_should_track_mtime_and_size() {
+        let dir = tmp_models("fingerprint");
+        let p = dir.join("probe.toml");
+        std::fs::write(&p, b"one").unwrap();
+        let f1 = file_fingerprint(&p).expect("存在文件应有指纹");
+        std::fs::write(&p, b"one-longer").unwrap();
+        let f2 = file_fingerprint(&p).expect("改写后应有指纹");
+        assert_ne!(f1, f2, "size 变化必须改变指纹");
+        assert!(file_fingerprint(&dir.join("nope.toml")).is_none(), "缺失文件无指纹");
     }
 }
