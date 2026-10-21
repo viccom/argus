@@ -24,6 +24,7 @@
 | [plans/2026-10-21-engine-manager-dynamic-slots-plan.md](plans/2026-10-21-engine-manager-dynamic-slots-plan.md) | 动态槽实施计划（13 任务 TDD 清单，对齐设计 F0-F4） | 已完成（2026-10-21；T0-T13 全部回填，合并 main） |
 | [plans/2026-10-21-rust-onnx-infer-text-embedding-plan.md](plans/2026-10-21-rust-onnx-infer-text-embedding-plan.md) | fork 文本 Embedding 引擎实施计划（T0-T8；T1 模型获取为批准门） | 已完成（2026-10-21；T0-T8 全销账，fork `fdd7beb` push + argus 零回归验证通过） |
 | [plans/2026-10-21-argus-text-embedding-endpoint-plan.md](plans/2026-10-21-argus-text-embedding-endpoint-plan.md) | argus 批 D1 端点实施计划（D0-D6；E2E 验收 6 项） | 已完成（2026-10-21；D0-D6 全销账） |
+| [plans/2026-10-21-homepix-embed-text-verification-plan.md](plans/2026-10-21-homepix-embed-text-verification-plan.md) | 批 D1 交付的 homepix 侧验证计划（V1-V8 用例 + 硬条件映射 + 一键脚本 + 自起实例附录） | approved（2026-10-21，交付 homepix Coding Agent 执行） |
 | [engine-exposure-plan.md](engine-exposure-plan.md) | A 类引擎暴露任务跟踪表（批 1/1.5/1.6/2-6） | 活跃 |
 | [yolo-rs-absorption-plan.md](yolo-rs-absorption-plan.md) | yolo-rs 能力吸收与退役方案（阶段 0-6） | 进行中（阶段 0/1/2/3/5 完成；其余见文内） |
 | [homepix-integration-plan.md](homepix-integration-plan.md) | Argus × homepix 集成改进表（A/B/C/D 批） | 进行中（A 完成；D1 完成（生产部署待做）；B2/B4、C1/C4/C5 未完成） |

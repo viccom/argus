@@ -1,6 +1,7 @@
 //! 文本 Embedding 路由：`POST /embed/text`。
 //!
-//! 引擎：`TextEmbeddingEngine`（bge-small-zh-v1.5，CLS 池化 + L2 归一化 + maxlen 512）。
+//! 引擎：`TextEmbeddingEngine`（jina-embeddings-v2-base-zh，MaskedMean 池化 +
+//! L2 归一化 + maxlen 512，双语 A/B 选型见 fork 计划表 2026-10-21）。
 //! 逐条 `embed()` 循环（非 `embed_batch`）：本机实测逐条更快（2026-10-21 T8）且
 //! 严格跨批逐位确定；空字符串在 HTTP 层前置校验（引擎兜底是 inference_failed，
 //! 语义码不对——fork 审查移交事项）。
@@ -26,7 +27,7 @@ const MAX_TEXT_CHARS: usize = 2000;
 #[derive(Deserialize)]
 pub struct EmbedTextRequest {
     texts: Vec<String>,
-    /// `passage`（缺省）/`query`，两值等价实现（bge v1.5 官方短查询无需指令前缀）。
+    /// `passage`（缺省）/`query`，两值等价实现（jina v2 短查询无需指令前缀）。
     mode: Option<String>,
     /// 仅接受 true/缺省——引擎构造期已归一化，v1 不支持关闭（显式报错优于静默忽略）。
     normalize: Option<bool>,
