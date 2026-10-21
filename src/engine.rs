@@ -159,8 +159,6 @@ pub struct EngineManager {
     /// A4 溯源缓存：能力键 → ModelInfo（model 串含文件 hash，首查后缓存）。
     model_registry: std::sync::RwLock<std::collections::HashMap<String, ModelInfo>>,
     /// 检测族动态槽（slots.toml）。静态 3 槽保持 OnceCell——registry 纯增量（设计 C1）。
-    /// 生产消费方在 T8 路由接线后就位，届时移除 allow（增量交付中间态）。
-    #[allow(dead_code)]
     pub(crate) slots: SlotRegistry<DetectionEngine>,
 }
 
@@ -195,6 +193,7 @@ impl EngineManager {
     /// class_names 注入（数量不符仅 warn），预热失败 warn 不阻断（设计 §4.2/§4.4）。
     fn build_slot_registry(device: DeviceType, default_pool: usize) -> SlotRegistry<DetectionEngine> {
         let build = move |spec: &SlotSpec, device: DeviceType| -> Result<EnginePool<DetectionEngine>, AppError> {
+            let t0 = std::time::Instant::now();
             let pool_size = spec.pool_size.unwrap_or(default_pool).max(1);
             let mut engines = Vec::with_capacity(pool_size);
             for _ in 0..pool_size {
@@ -217,15 +216,23 @@ impl EngineManager {
             }
             let pool = EnginePool::new(engines);
             // 预热：每实例 dummy 推理，失败 warn 不阻断。本闭包运行于 spawn_blocking，
-            // 同步执行与静态槽 EnginePool::warmup 的阻塞路径语义等价
+            // 同步执行与静态槽 EnginePool::warmup 的阻塞路径语义等价。
+            // 预热亦占用全局构建互斥，期间其它槽首建排队（设计 C6 资源上界的代价）
             let (w, h) = spec.warmup_size.unwrap_or((640, 640));
             for (idx, engine) in pool.instances.iter().enumerate() {
+                let t_warm = std::time::Instant::now();
                 match engine.predict(&dummy_image(w as i32, h as i32)).map(|_| ()) {
-                    Ok(()) => tracing::info!("槽 {} 实例 {}/{} 预热完成", spec.name, idx + 1, pool_size),
+                    Ok(()) => tracing::info!(
+                        "槽 {} 实例 {}/{} 预热完成 ({:?})",
+                        spec.name, idx + 1, pool_size, t_warm.elapsed()
+                    ),
                     Err(e) => tracing::warn!("槽 {} 实例 {}/{} 预热失败(不阻断): {e}", spec.name, idx + 1, pool_size),
                 }
             }
-            tracing::info!("动态槽 {} 池({pool_size}) 加载完成: {}", spec.name, spec.model_path.display());
+            tracing::info!(
+                "动态槽 {} 池({pool_size}) 加载完成: {} ({:?})",
+                spec.name, spec.model_path.display(), t0.elapsed()
+            );
             Ok(pool)
         };
         SlotRegistry::new(device, Arc::new(build))
@@ -336,13 +343,13 @@ impl EngineManager {
     }
 
     // ---- 动态槽（F2：装配、请求路径解析、观测） ----
-    // 三个入口的生产消费方在 T8（detection 路由 model 参数）与 T9（/health deep、
-    // /models）接入——当前仅测试引用，dead_code 属增量交付中间态，接入后移除 allow。
+    // resolve_dynamic_slot 已由路由 model 参数消费（detection/batch）；
+    // dynamic_loaded/dynamic_slot_health 的生产消费方在 T9（/health deep、/models）
+    // 接入——当前仅测试引用，dead_code 属增量交付中间态，接入后移除 allow。
 
     /// 检测族动态槽解析（三端点与 /detect/batch 的 `model` 参数入口）。
     /// 保留字（15 能力键）→ BadRequest 提示改用对应端点；白名单按 detection
     /// 门控（设计 §4.6）；未注册槽 → UnknownModel（列出可用槽名，不泄露路径）。
-    #[allow(dead_code)]
     pub async fn resolve_dynamic_slot(
         &self,
         name: &str,
@@ -375,8 +382,10 @@ impl EngineManager {
         let mut results = Vec::new();
         for slot in self.slots.slots_snapshot() {
             let Some(pool) = slot.pool() else { continue };
+            // 深检 dummy 尺寸与预热对齐（spec.warmup_size，缺省 640）
+            let (w, h) = slot.spec.warmup_size.unwrap_or((640, 640));
             let status = pool
-                .run(|e| e.predict(&dummy_image(640, 640)).map(|_| ()))
+                .run(move |e| e.predict(&dummy_image(w as i32, h as i32)).map(|_| ()))
                 .await;
             results.push(crate::slots::DynamicSlotHealth {
                 name: slot.spec.name.clone(),

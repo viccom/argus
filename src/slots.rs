@@ -330,11 +330,23 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
         let spec = slot.spec.clone();
         let build_fn = Arc::clone(&self.build_fn);
         let device = self.device;
+        // panic payload 提取为消息后直接 drop（不 resume_unwind——本层要把构建 panic
+        // 转成错误信封并计退避，而非把它重新抛进请求链路）
         let result = tokio::task::spawn_blocking(move || build_fn(&spec, device))
             .await
-            .map_err(|e| AppError::Internal(format!("槽构建任务失败: {e}")))?;
+            .map_err(|e| {
+                let msg = match e.try_into_panic() {
+                    Ok(payload) => payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "非字符串 panic".to_string()),
+                    Err(_) => "构建任务未执行（被取消）".to_string(),
+                };
+                AppError::Internal(format!("槽构建 panic: {msg}"))
+            });
         match result {
-            Ok(pool) => {
+            Ok(Ok(pool)) => {
                 let pool = Arc::new(pool);
                 // set 必须先于断言执行：debug_assert! 在 release 下不求值参数，
                 // 若内联 set 则 release 永远不缓存池（行为回退为每次重建）
@@ -342,7 +354,8 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
                 debug_assert!(set_ok, "set 不败依赖 build_sem=1 permit");
                 Ok((slot, pool))
             }
-            Err(e) => {
+            // 构建失败与构建 panic 同一退避记账：panic 不设退避会形成坏 builder 风暴
+            Ok(Err(e)) | Err(e) => {
                 *slot.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
                 slot.next_retry_at_ms.store(
                     now_epoch_ms() + self.retry_backoff.as_millis() as u64,
@@ -684,6 +697,34 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert!(registry.resolve("bad").await.is_err(), "窗口过期后重试仍失败（模型还是坏的）");
         assert_eq!(count.load(Ordering::SeqCst), 2, "窗口过期后应重试一次");
+    }
+
+    #[tokio::test]
+    async fn panicking_builder_should_report_panic_and_backoff() {
+        // panic 路径与普通构建失败同一退避记账：不设退避的坏 builder 会形成重复
+        // panic 风暴；payload 消息进错误信封（不丢失），不向请求链路 resume_unwind
+        let dir = tmp_models("registry-panic");
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&count);
+        let mut registry = SlotRegistry::new(
+            rust_onnx_infer::DeviceType::from_name("cpu"),
+            Arc::new(move |_: &SlotSpec, _d| -> Result<EnginePool<String>, AppError> {
+                c.fetch_add(1, Ordering::SeqCst);
+                panic!("boom");
+            }),
+        );
+        // 拉长退避窗口：测试在二次请求后即返回，不真等窗口过期
+        registry.set_retry_backoff_for_test(Duration::from_secs(10));
+        registry.apply_specs(vec![one_spec(&dir, "panic")]);
+
+        let err = registry.resolve("panic").await.err().expect("构建 panic 应转为错误");
+        assert!(
+            err.to_string().contains("panic") && err.to_string().contains("boom"),
+            "错误应携带 panic 消息: {err}"
+        );
+        let err = registry.resolve("panic").await.err().expect("退避窗口内应拒绝");
+        assert!(err.to_string().contains("退避"), "应提示退避中: {err}");
+        assert_eq!(count.load(Ordering::SeqCst), 1, "退避窗口内不得重试构建");
     }
 
     #[tokio::test]

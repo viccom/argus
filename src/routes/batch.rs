@@ -6,7 +6,7 @@
 //! 与 yolo-rs 差异（吸收计划阶段 3 明确要求）：
 //! - **错误隔离**：单图失败该条目带 `error`，不炸整批（yolo-rs 是 `?` 直接中断）；
 //! - **每图独立背压 permit**：过载时按 `ARGUS_ACQUIRE_TIMEOUT_MS` 语义排队或 fail-fast；
-//! - `model` 参数待动态模型管理（吸收计划阶段 2），传入即拒绝而非静默忽略。
+//! - `model` 可选：命名动态槽（slots.toml），缺省用预置 detection 槽；
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
@@ -27,7 +27,7 @@ use crate::routes::health::AppState;
 #[derive(Deserialize)]
 pub struct BatchRequest {
     image_paths: Vec<String>,
-    /// 动态模型管理落地前不支持，传入即拒绝（不静默忽略）
+    /// 可选动态槽名（slots.toml 注册）；缺省用预置 detection 槽
     model: Option<String>,
     confidence: Option<f64>,
     target_classes: Option<Vec<i32>>,
@@ -57,18 +57,25 @@ pub async fn detect_batch(
 ) -> Result<Json<Value>, AppError> {
     // JSON 解析失败走服务统一信封（HTTP 200 + status=error），而非 axum 默认的 4xx 纯文本
     let Json(req) = body.map_err(|e| AppError::BadRequest(format!("JSON 请求体无效: {e}")))?;
-    if req.model.is_some() {
-        return Err(AppError::BadRequest(
-            "model 参数待动态模型管理（吸收计划阶段 2）支持，当前仅预置检测模型".into(),
-        ));
-    }
     if req.image_paths.is_empty() {
         return Err(AppError::BadRequest("image_paths 不能为空".into()));
     }
     let roi = req.roi.map(Polygon::from_points).transpose()?;
     let filter = DetectFilter::new(req.confidence, req.target_classes, roi)?;
-    // 模型未配置是整批级错误（无引擎可用），不做逐图隔离
-    let pool = state.engines.detection().await?;
+    // 模型未配置是整批级错误（无引擎可用），不做逐图隔离；动态槽在入口解析一次，
+    // 逐图复用同一池与同一溯源（单图失败仍按现有语义隔离）
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (pool, dyn_slot) = match model {
+        None => (state.engines.detection().await?, None),
+        Some(name) => {
+            let (slot, pool) = state.engines.resolve_dynamic_slot(name).await?;
+            (pool, Some(slot))
+        }
+    };
 
     let t0 = std::time::Instant::now();
     let mut results = Vec::with_capacity(req.image_paths.len());
@@ -97,7 +104,13 @@ pub async fn detect_batch(
         "批量检测完成"
     );
 
-    let (model, pipeline) = state.engines.provenance("detection").await;
+    let (model, pipeline) = match &dyn_slot {
+        Some(slot) => match slot.model_info().await {
+            Some(m) => (json!(m.model), json!(m.pipeline)),
+            None => (Value::Null, Value::Null),
+        },
+        None => state.engines.provenance("detection").await,
+    };
     Ok(Json(json!({
         "status": "ok",
         "data": {
@@ -176,10 +189,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_with_model_param_is_rejected_not_ignored() {
-        let (_, text) = post_batch(r#"{"image_paths": ["/tmp/a.jpg"], "model": "yolov8n"}"#).await;
-        assert!(text.contains("error") && text.contains("model"), "{text}");
-        assert!(text.contains("阶段 2"), "应指向动态模型管理: {text}");
+    async fn batch_with_model_unknown_slot_returns_unknown_model() {
+        let (_, text) = post_batch(r#"{"image_paths": ["/tmp/a.jpg"], "model": "nope"}"#).await;
+        assert!(text.contains("\"code\":\"unknown_model\""), "{text}");
+    }
+
+    #[tokio::test]
+    async fn batch_with_reserved_model_returns_bad_request_hint() {
+        let (_, text) = post_batch(r#"{"image_paths": ["/tmp/a.jpg"], "model": "detection"}"#).await;
+        assert!(text.contains("静态能力键") && text.contains("端点"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn batch_with_empty_model_should_fall_back_to_static() {
+        // 空 model = 未传：走静态 detection（未配模型 → 整批"模型未配置"）
+        let (_, text) = post_batch(r#"{"image_paths": ["/tmp/a.jpg"], "model": ""}"#).await;
+        assert!(text.contains("未配置") || text.contains("model"), "{text}");
+        assert!(!text.contains("unknown_model"), "{text}");
     }
 
     #[tokio::test]
