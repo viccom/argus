@@ -184,9 +184,9 @@ pub struct Slot<T> {
     pub spec: SlotSpec,
     pool: OnceCell<Arc<EnginePool<T>>>,
     model_info_cache: OnceCell<ModelInfo>,
-    last_error: std::sync::Mutex<Option<String>>,
-    /// 失败退避截止（epoch 毫秒）；0 = 无退避（从未失败）。
-    next_retry_at_ms: std::sync::atomic::AtomicU64,
+    /// 上次构建失败信息与退避截止（同一把锁，单调时钟——免疫墙钟跳变；
+    /// 此前用 epoch 毫秒 AtomicU64，时钟回拨会拉长退避窗口）。
+    failure: std::sync::Mutex<Option<(String, std::time::Instant)>>,
 }
 
 impl<T> Slot<T> {
@@ -195,8 +195,7 @@ impl<T> Slot<T> {
             spec,
             pool: OnceCell::new(),
             model_info_cache: OnceCell::new(),
-            last_error: std::sync::Mutex::new(None),
-            next_retry_at_ms: std::sync::atomic::AtomicU64::new(0),
+            failure: std::sync::Mutex::new(None),
         }
     }
 
@@ -244,13 +243,6 @@ pub struct SlotRegistry<T> {
     device: DeviceType,
     build_fn: SlotBuildFn<T>,
     retry_backoff: Duration,
-}
-
-fn now_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl<T: Send + Sync + 'static> SlotRegistry<T> {
@@ -352,11 +344,8 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
             }
             // 构建失败与构建 panic 同一退避记账：panic 不设退避会形成坏 builder 风暴
             Ok(Err(e)) | Err(e) => {
-                *slot.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
-                slot.next_retry_at_ms.store(
-                    now_epoch_ms() + self.retry_backoff.as_millis() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                *slot.failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((e.to_string(), std::time::Instant::now() + self.retry_backoff));
                 tracing::error!(
                     "动态槽 {} 构建失败（退避 {:?}）: {e}",
                     slot.spec.name, self.retry_backoff
@@ -370,22 +359,17 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
     /// resolve 两处调用（acquire 前后各一次），acquire 后的复检确保已排队
     /// 请求不重复触发失败构建。
     fn check_backoff(slot: &Slot<T>) -> Result<(), AppError> {
-        let now = now_epoch_ms();
-        let until = slot.next_retry_at_ms.load(std::sync::atomic::Ordering::Relaxed);
-        if now >= until {
-            return Ok(());
+        let failure = slot.failure.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((last, deadline)) = failure.as_ref() {
+            if let Some(wait) = deadline.checked_duration_since(std::time::Instant::now()) {
+                return Err(AppError::Internal(format!(
+                    "动态槽 {} 此前加载失败（{last}），退避中，{}ms 后可重试",
+                    slot.spec.name,
+                    wait.as_millis()
+                )));
+            }
         }
-        let last = slot
-            .last_error
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .unwrap_or_else(|| "未知错误".into());
-        Err(AppError::Internal(format!(
-            "动态槽 {} 此前加载失败（{last}），退避中，{}ms 后可重试",
-            slot.spec.name,
-            until - now
-        )))
+        Ok(())
     }
 
     fn unknown_model_message(&self, name: &str) -> String {
@@ -482,7 +466,11 @@ pub async fn watch_loop(
     config: std::sync::Arc<crate::config::Config>,
 ) {
     let interval = Duration::from_secs(config.slots_watch_secs.max(1));
-    let mut last_fp = file_fingerprint(&config.slots_path());
+    // 初始指纹必须为 None 而非读取当前文件：main 的 load_specs 与本行之间存在
+    // 窗口，文件恰在窗口内变更时，"当前指纹"已等于新版本而 registry 仍是旧版，
+    // 之后每轮 fp==last_fp 恒成立、新版本永不生效。None 保证首轮必重读并
+    // apply（同规格 diff 幂等，未变槽不重建），代价仅启动后一次冗余解析。
+    let mut last_fp: Option<FileFingerprint> = None;
     tracing::info!(
         "slots.toml 热重载已启动(周期 {interval:?}, 路径 {})",
         config.slots_path().display()
