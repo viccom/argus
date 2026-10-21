@@ -32,6 +32,7 @@
 | 16 | **yolov8s.onnx** | 检测，COCO 80 | 44.9MB | 211cb4e1f537 | github ultralytics/assets v8.4.0 + venv 导出 | count=5，top1 bus 0.920，两批热态均值 54-104ms（批次波动大，共享机负载）；官方参照一致 | **detection 默认升档首选**：精度高于 v8n；切默认需改 ARGUS_DETECTION_MODEL+重启 |
 | 17 | **yolo11s.onnx** | 检测，COCO 80 | 38.1MB | cbdf4ed84a3a | **魔搭** `AI-ModelScope/YOLO11`（官方镜像）+ venv 导出 | count=5，top1 **bus 0.946**（三方最高；官方参照 0.937 同族），105-57ms | 精度王候选；来源证明魔搭官方镜像可信 |
 | 19 | **pothole-vinoth.onnx** | 检测，5 类路面病害（纵裂/横裂/龟裂/坑洞/其他） | 43.7MB | a2dd504313fe | HF [vinothvikas1987/pothole-detection-yolov8](https://huggingface.co/vinothvikas1987/pothole-detection-yolov8) + venv 导出（class_names 注入实测过） | 入槽 ok：溯源正确、深检 ok、bus.jpg 0 检出（负样本正确）；**需真实路面图评估精度**（合成图 0 检出，域差）（2026-10-21） |
+| 21 | **vehicle-classifier-vmmrdb-full.onnx** | 分类，**8949 类机动车品牌-型号-年份**（VMMRdb） | 129MB（内联） | — | HF [Jordo23/vehicle-classifier](https://huggingface.co/Jordo23/vehicle-classifier) .pth + timm 自导（官方 onnx 缺外置权重 .data，见 §三） | ✅ 语义验证：zidane 轿车 top1 `Acura MDX 2012` conf 0.529、大巴域外 max 0.026（2026-10-21）；EfficientNet-B4 380×380，类名表 models-dl/vehicle-classifier-class-mapping.csv（8951 行）；**接入走 classification 静态槽**（注意无 names metadata，需 csv 映射或二次烘焙） |
 | 20 | **fire-smoke-dfire.onnx** | 检测，smoke/fire 2 类（D-Fire 数据集） | 11.7MB | b734753d9e1a | HF [rabahdev/fire-smoke-yolov8n](https://huggingface.co/rabahdev/fire-smoke-yolov8n) + venv 导出 | 入槽 ok；**bus.jpg 假阳性 fire@0.34**——换代前必须真实图集 A/B 现役 fire_smoke_2cls（2026-10-21） |
 | 18 | **yolo26n.onnx** | 检测，COCO 80，NMS-free e2e | 9.9MB | 4fd0c3d74b65 | github ultralytics/assets v8.4.0 + venv 导出 | count=5，top1 bus 0.908，**39ms（全场最快，同批内）** | 速度王候选；e2e 布局与传统同形，引擎兼容实证 |
 
@@ -66,4 +67,4 @@
 
 ## 变更记录
 
-- 2026-10-21：三批补充（`177d8ee`/本提交）。§二 +2（pothole-vinoth、fire-smoke-dfire 入槽验证）；§三 +3（crack-seg 双档 seg 不适用、镜像截断件、gated 仓）。首版。汇总现役 15（含 2 组多模型件）、已验证未启用 3、受限/排除 8，共 30 项；实测数据回源自 README 模型表、engine-exposure-plan 验证列、e2e-and-models 踩坑表、两批下载实测（b62257e/af823e0）。
+- 2026-10-21：第四批（`645dc04`/本提交）+2：VMMRdb 8949 类车型识别（timmm 自导内联，语义验证过）、Stanford Cars 受限件。三批补充（`177d8ee`/本提交）。§二 +2（pothole-vinoth、fire-smoke-dfire 入槽验证）；§三 +3（crack-seg 双档 seg 不适用、镜像截断件、gated 仓）。首版。汇总现役 15（含 2 组多模型件）、已验证未启用 3、受限/排除 8，共 32 项；实测数据回源自 README 模型表、engine-exposure-plan 验证列、e2e-and-models 踩坑表、两批下载实测（b62257e/af823e0）。
