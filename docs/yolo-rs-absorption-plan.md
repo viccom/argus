@@ -115,6 +115,7 @@
 
 ### 阶段 2:EngineManager 动态化(缺口 D,~1-2 天,与 P2 重构合并) — ✅ 完成(2026-10-21)
 - **实施形态与初稿的差异**(详见 [plans/2026-10-21-engine-manager-dynamic-slots-plan.md](plans/2026-10-21-engine-manager-dynamic-slots-plan.md) 与设计):结构未改成 DashMap/DynEngine——静态 15 槽 OnceCell 一律不动,**新增纯增量 `slots.rs` 动态槽 registry**(设计 C1,零回归);注册方式不是目录扫描而是**显式清单 `slots.toml`**(显式配置可评审/可回滚,半写入风险由 last-known-good 兜底);路由是三个检测端点与 `/detect/batch` 的**可选 `model` 参数**(缺省走静态路径,逐字节不变),未做 `/detect/{model}` 路径;`models.toml` 未引入(覆盖项收敛为槽的 `class_names`/`pool_size`/`warmup_size` 三项);卸载靠"删槽 + 在途请求持 Arc 自然释放",未做 `POST /models/{name}/unload` 端点。
+- 以下为**初稿存档,未按此实施**(仅保留决策对照,实际形态见上一条与设计文档):
 - 结构:`OnceCell<固定字段>` → `DashMap<String, Arc<EnginePool<DynEngine>>>`;name→引擎类型由**目录+能力注册表**解析(见下);
 - 模型目录约定:`models/` 下按能力子目录(`detect/`、`classify/`、`pose/`…),文件名即模型名;`POST /models/{name}/unload` 幂等卸载(进行中推理持 Arc 自然释放);
 - **路径校验照抄 yolo-rs**(拒绝 `..`/`/`/`\`/`\0`/空);
