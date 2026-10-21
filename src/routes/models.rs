@@ -183,10 +183,12 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
         .collect()
 }
 
-/// GET /models — 返回 `{"status":"success","data":{"capabilities":{能力名:{...}}}}`。
+/// GET /models — 返回 `{"status":"success","data":{"capabilities":{能力名:{...}},
+/// "dynamic_slots":{槽名:{...}}}}`。
 ///
 /// 消费方（如 safe_bot）取 `capabilities.detection.models` 即该端点可用于目标
-/// 检测的模型名清单。
+/// 检测的模型名清单；`dynamic_slots` 是 slots.toml 动态槽的配置态/加载态
+/// （设计 C2：独立键，capabilities 15 项形状不受影响）。
 pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
     let loaded = state.engines.list_loaded();
     let mut caps = capability_models(&state.config, &loaded);
@@ -200,7 +202,26 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
             }
         }
     }
-    Json(json!({ "status": "success", "data": { "capabilities": caps } }))
+    // 动态槽清单（设计 C2：独立 dynamic_slots 键，capabilities 的 15 项不动——
+    // safebot-go 只读 capabilities.detection.models，语义零变化）
+    let mut dynamic = Map::new();
+    for slot in state.engines.slots.slots_snapshot() {
+        dynamic.insert(
+            slot.spec.name.clone(),
+            json!({
+                "configured": true,
+                "loaded": slot.loaded(),
+                "model_file": slot
+                    .spec
+                    .model_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                "pipeline": crate::slots::SLOT_PIPELINE,
+            }),
+        );
+    }
+    Json(json!({ "status": "success", "data": { "capabilities": caps, "dynamic_slots": dynamic } }))
 }
 
 #[cfg(test)]
@@ -443,7 +464,7 @@ mod tests {
             .await
             .unwrap();
         let body = body_json(resp).await;
-        let mut expected = json!({"status": "success", "data": {"capabilities": {}}});
+        let mut expected = json!({"status": "success", "data": {"capabilities": {}, "dynamic_slots": {}}});
         for key in [
             "detection", "ppe", "fire_smoke", "classification", "obb", "segmentation",
             "face_detection", "face_recognition", "reid", "ocr", "license_plate", "qr",
@@ -478,5 +499,45 @@ mod tests {
             }
         });
         assert_eq!(body, expected, "/models 默认信封与 golden 不一致");
+    }
+
+    // ---- 动态槽观测字段（F2，设计 C2：只加不改） ----
+
+    fn state_with_slot(tag: &str) -> AppState {
+        let dir = std::env::temp_dir().join(format!("argus-models-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.onnx"), b"fake").unwrap();
+        let config = Config {
+            models_dir: dir.clone(),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config.clone());
+        mgr.slots.apply_specs(
+            crate::slots::parse_slots_toml("[slots.crack]\nmodel = \"m.onnx\"\n", &dir).unwrap(),
+        );
+        AppState::new(config, mgr)
+    }
+
+    #[tokio::test]
+    async fn models_should_always_carry_dynamic_slots_map() {
+        // 无槽时也应输出空对象：字段形状稳定（只加不改的"加"）
+        let app = crate::routes::health::build_router(test_state(Config::default()), None);
+        let resp = app.oneshot(Request::get("/models").body(Body::empty()).unwrap()).await.unwrap();
+        let body = body_json(resp).await;
+        assert_eq!(body["data"]["dynamic_slots"], serde_json::json!({}), "{body}");
+    }
+
+    #[tokio::test]
+    async fn models_should_report_slot_status_and_keep_capabilities_untouched() {
+        let app = crate::routes::health::build_router(state_with_slot("dyn"), None);
+        let resp = app.oneshot(Request::get("/models").body(Body::empty()).unwrap()).await.unwrap();
+        let body = body_json(resp).await;
+        let slot = &body["data"]["dynamic_slots"]["crack"];
+        assert_eq!(slot["configured"], true, "{body}");
+        assert_eq!(slot["loaded"], false, "未构建应 loaded=false: {body}");
+        assert_eq!(slot["model_file"], "m.onnx", "只报文件名不报路径: {body}");
+        assert_eq!(slot["pipeline"], "detect-slot-v1", "{body}");
+        // 15 项 capabilities 逐字节不受影响（golden 已锁形状，此处再锁数量）
+        assert_eq!(body["data"]["capabilities"].as_object().unwrap().len(), 15, "{body}");
     }
 }

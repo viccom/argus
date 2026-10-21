@@ -85,6 +85,10 @@ pub async fn health(
         body["configured"] = json!(configured);
         let health_results = state.engines.deep_health_check().await;
         body["engine_health"] = json!(health_results);
+        // 动态槽深检字段（设计 C3：engines/engine_health 现有字段不动，
+        // 只在 deep 分支追加——浅检信封零变化）
+        body["dynamic_engines"] = json!(state.engines.dynamic_loaded());
+        body["dynamic_slot_health"] = json!(state.engines.dynamic_slot_health().await);
     }
     Json(body)
 }
@@ -112,8 +116,8 @@ pub async fn service_info(
         "endpoints": {
             "GET /health": "健康检查",
             "GET /models": "能力键控的模型清单（configured/loaded/models，每能力实际使用的模型文件名）",
-            "POST /detect": "目标检测（multipart: file/sahi/slice_w/slice_h/overlap/confidence?/target_classes?/roi?）",
-            "POST /detect/batch": "批量检测（JSON: image_paths[服务端本地路径]/confidence?/target_classes?/roi?，逐图独立背压与错误隔离）",
+            "POST /detect": "目标检测（multipart: file/sahi/slice_w/slice_h/overlap/confidence?/target_classes?/roi?/model?[动态槽名]）",
+            "POST /detect/batch": "批量检测（JSON: image_paths[服务端本地路径]/confidence?/target_classes?/roi?/model?[动态槽名]，逐图独立背压与错误隔离）",
             "POST /classify": "图像分类（multipart: file/top_k?）",
             "POST /detect/obb": "OBB 旋转框检测（multipart: file）",
             "POST /face/detect": "人脸检测（multipart: file）",
@@ -451,8 +455,35 @@ mod tests {
                 },
                 "configured": ["detection"],
                 "engine_health": [],
+                "dynamic_engines": [],
+                "dynamic_slot_health": [],
             }),
             "深检信封与 golden 不一致"
         );
+    }
+
+    // ---- 动态槽 deep 字段（F2，设计 C3：engines/engine_health 不变） ----
+
+    #[tokio::test]
+    async fn health_deep_should_carry_dynamic_fields_and_shallow_should_not() {
+        let app = build_router(test_state(), None);
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/health?deep=true").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["dynamic_engines"], serde_json::json!([]), "无槽应为空数组");
+        assert_eq!(body["dynamic_slot_health"], serde_json::json!([]), "{body}");
+
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let text = body_text(resp).await;
+        assert!(!text.contains("dynamic_engines"), "浅检不得新增字段: {text}");
     }
 }

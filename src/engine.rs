@@ -215,6 +215,12 @@ impl EngineManager {
                 engines.push(Arc::new(engine));
             }
             let pool = EnginePool::new(engines);
+            // 加载完成日志先于预热：与静态 loader 的"引擎 {capability} 池(N) 加载完成"
+            // 位置一致，耗时不含预热；预热的每实例日志已带各自耗时
+            tracing::info!(
+                "动态槽 {} 池({pool_size}) 加载完成: {} ({:?})",
+                spec.name, spec.model_path.display(), t0.elapsed()
+            );
             // 预热：每实例 dummy 推理，失败 warn 不阻断。本闭包运行于 spawn_blocking，
             // 同步执行与静态槽 EnginePool::warmup 的阻塞路径语义等价。
             // 预热亦占用全局构建互斥，期间其它槽首建排队（设计 C6 资源上界的代价）
@@ -229,10 +235,6 @@ impl EngineManager {
                     Err(e) => tracing::warn!("槽 {} 实例 {}/{} 预热失败(不阻断): {e}", spec.name, idx + 1, pool_size),
                 }
             }
-            tracing::info!(
-                "动态槽 {} 池({pool_size}) 加载完成: {} ({:?})",
-                spec.name, spec.model_path.display(), t0.elapsed()
-            );
             Ok(pool)
         };
         SlotRegistry::new(device, Arc::new(build))
@@ -343,9 +345,8 @@ impl EngineManager {
     }
 
     // ---- 动态槽（F2：装配、请求路径解析、观测） ----
-    // resolve_dynamic_slot 已由路由 model 参数消费（detection/batch）；
-    // dynamic_loaded/dynamic_slot_health 的生产消费方在 T9（/health deep、/models）
-    // 接入——当前仅测试引用，dead_code 属增量交付中间态，接入后移除 allow。
+    // resolve_dynamic_slot 由路由 model 参数消费（detection/batch）；
+    // dynamic_loaded/dynamic_slot_health 由 /health deep 与 /models 消费（T9 接线）。
 
     /// 检测族动态槽解析（三端点与 /detect/batch 的 `model` 参数入口）。
     /// 保留字（15 能力键）→ BadRequest 提示改用对应端点；白名单按 detection
@@ -364,7 +365,6 @@ impl EngineManager {
     }
 
     /// 已加载动态槽名（/health deep 的 dynamic_engines，字典序）。
-    #[allow(dead_code)]
     pub fn dynamic_loaded(&self) -> Vec<String> {
         self.slots
             .slots_snapshot()
@@ -377,7 +377,6 @@ impl EngineManager {
     /// 动态槽深检：对每个已加载槽发 dummy 推理（与 check_engine! 同语义，
     /// 未加载槽跳过）。槽名是 String，与静态 engine_health 的 &'static str 分列
     /// 两个字段（设计 C3）。
-    #[allow(dead_code)]
     pub async fn dynamic_slot_health(&self) -> Vec<crate::slots::DynamicSlotHealth> {
         let mut results = Vec::new();
         for slot in self.slots.slots_snapshot() {

@@ -334,16 +334,17 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
         // 转成错误信封并计退避，而非把它重新抛进请求链路）
         let result = tokio::task::spawn_blocking(move || build_fn(&spec, device))
             .await
-            .map_err(|e| {
-                let msg = match e.try_into_panic() {
-                    Ok(payload) => payload
+            .map_err(|e| match e.try_into_panic() {
+                Ok(payload) => {
+                    let msg = payload
                         .downcast_ref::<&str>()
                         .map(|s| s.to_string())
                         .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "非字符串 panic".to_string()),
-                    Err(_) => "构建任务未执行（被取消）".to_string(),
-                };
-                AppError::Internal(format!("槽构建 panic: {msg}"))
+                        .unwrap_or_else(|| "非字符串 panic".to_string());
+                    AppError::Internal(format!("槽构建 panic: {msg}"))
+                }
+                // 非 panic 的 JoinError（任务被取消/runtime 关闭）不冠 panic 前缀
+                Err(_) => AppError::Internal("槽构建任务未执行（runtime 关闭）".into()),
             });
         match result {
             Ok(Ok(pool)) => {
@@ -719,8 +720,8 @@ mod tests {
 
         let err = registry.resolve("panic").await.err().expect("构建 panic 应转为错误");
         assert!(
-            err.to_string().contains("panic") && err.to_string().contains("boom"),
-            "错误应携带 panic 消息: {err}"
+            err.to_string().contains("槽构建 panic: boom"),
+            "错误应携带提取的 panic payload（防回归回 JoinError Display 拼接）: {err}"
         );
         let err = registry.resolve("panic").await.err().expect("退避窗口内应拒绝");
         assert!(err.to_string().contains("退避"), "应提示退避中: {err}");
