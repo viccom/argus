@@ -1,0 +1,9 @@
+{
+  "data": {
+    "count": 0,
+    "detections": [],
+    "model": "fire_smoke_2cls.onnx#7df58b06861a",
+    "pipeline": "yolov8-firesmoke2cls-det640-letterbox-v1"
+  },
+  "status": "ok"
+}

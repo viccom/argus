@@ -81,6 +81,7 @@ struct DetectParams {
     confidence: Option<f64>,
     target_classes: Option<Vec<i32>>,
     roi: Option<Polygon>,
+    model: Option<String>,
 }
 
 async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams, AppError> {
@@ -92,6 +93,7 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
     let mut confidence: Option<f64> = None;
     let mut target_classes: Option<Vec<i32>> = None;
     let mut roi: Option<Polygon> = None;
+    let mut model: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -137,6 +139,12 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
                     roi = Some(Polygon::parse(&text)?);
                 }
             }
+            "model" => {
+                let text = field_text(field).await?;
+                if !text.trim().is_empty() {
+                    model = Some(text.trim().to_string());
+                }
+            }
             _ => { /* 忽略未知字段 */ }
         }
     }
@@ -151,6 +159,7 @@ async fn parse_detect_multipart(mut multipart: Multipart) -> Result<DetectParams
         confidence,
         target_classes,
         roi,
+        model,
     })
 }
 
@@ -187,6 +196,13 @@ impl DetectCap {
     }
 }
 
+/// 池来源：静态能力槽（缺省）或动态命名槽（model 参数）。
+/// 静态路径逐字节不变（设计 C4：只加动态分支）。
+enum DetectSource {
+    Static(&'static str),
+    Dynamic(std::sync::Arc<crate::slots::Slot<rust_onnx_infer::engines::detection::DetectionEngine>>),
+}
+
 /// 检测族共享实现:参数校验先于图像解码与引擎加载,非法参数不消耗推理资源。
 pub(crate) async fn run_detect(
     state: AppState,
@@ -199,7 +215,13 @@ pub(crate) async fn run_detect(
     let image = decode_image(params.file, state.config.max_image_pixels).await?;
     let (img_w, img_h) = (image.width(), image.height());
 
-    let pool = cap.pool(&state).await?;
+    let (pool, source) = match params.model.as_deref() {
+        None => (cap.pool(&state).await?, DetectSource::Static(cap.key())),
+        Some(name) => {
+            let (slot, pool) = state.engines.resolve_dynamic_slot(name).await?;
+            (pool, DetectSource::Dynamic(slot))
+        }
+    };
 
     let permit = acquire_permit(&state).await?;
 
@@ -249,7 +271,13 @@ pub(crate) async fn run_detect(
         data["sahi_slices"] = json!(n);
     }
     data["queue_ms"] = json!(permit.queue_ms);
-    let (model, pipeline) = state.engines.provenance(cap.key()).await;
+    let (model, pipeline) = match &source {
+        DetectSource::Static(key) => state.engines.provenance(key).await,
+        DetectSource::Dynamic(slot) => match slot.model_info().await {
+            Some(m) => (serde_json::json!(m.model), serde_json::json!(m.pipeline)),
+            None => (serde_json::Value::Null, serde_json::Value::Null),
+        },
+    };
     data["model"] = model;
     data["pipeline"] = pipeline;
 
@@ -422,6 +450,30 @@ mod tests {
         ]))
         .await;
         assert!(text.contains("未配置") || text.contains("model"), "应到达引擎加载: {text}");
+    }
+
+    // ---- 动态槽 model 参数（F2） ----
+
+    #[tokio::test]
+    async fn detect_with_unknown_model_returns_unknown_model_envelope() {
+        let text = post_detect(multipart_png_with_fields(&[("model", "nope")])).await;
+        assert!(text.contains("\"code\":\"unknown_model\""), "{text}");
+        assert!(text.contains("无已注册动态槽"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn detect_with_reserved_model_name_returns_bad_request_hint() {
+        let text = post_detect(multipart_png_with_fields(&[("model", "ppe")])).await;
+        assert!(text.contains("静态能力键"), "{text}");
+        assert!(text.contains("端点"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn detect_with_empty_model_field_should_be_treated_as_absent() {
+        // 前端表单常发空串：视为未传，走静态路径（未配模型 → 模型未配置错误）
+        let text = post_detect(multipart_png_with_fields(&[("model", "")])).await;
+        assert!(text.contains("未配置") || text.contains("model"), "空 model 应走静态路径: {text}");
+        assert!(!text.contains("unknown_model"), "空串不是 unknown_model: {text}");
     }
 
     #[tokio::test]

@@ -33,6 +33,11 @@ pub enum AppError {
     /// axum 的 DefaultBodyLimit 超限在 multipart 错误里报告为 413，可与之区分。
     #[error("内容过大: {0}")]
     TooLarge(String),
+
+    /// `model` 参数指向未注册/已删除的动态槽。消息内嵌可用槽名清单，
+    /// 不泄露文件系统路径（槽名来自 URL，是外部输入）。
+    #[error("未知模型槽: {0}")]
+    UnknownModel(String),
 }
 
 impl AppError {
@@ -47,6 +52,7 @@ impl AppError {
             AppError::Internal(_) => "internal",
             AppError::Overload(_) => "overload",
             AppError::TooLarge(_) => "too_large",
+            AppError::UnknownModel(_) => "unknown_model",
         }
     }
 
@@ -63,7 +69,9 @@ impl IntoResponse for AppError {
         // 因此必须在响应构造处主动落日志，否则生产环境无失败痕迹可查。
         match &self {
             // 客户端输入问题：量可能大且非服务故障，降为 debug 不刷屏
-            AppError::BadRequest(_) | AppError::TooLarge(_) => tracing::debug!("{}", self.to_string()),
+            AppError::BadRequest(_) | AppError::TooLarge(_) | AppError::UnknownModel(_) => {
+                tracing::debug!("{}", self.to_string())
+            }
             // 背压拒绝属预期内的过载信号
             AppError::Overload(_) => tracing::warn!("请求被背压拒绝: {}", self.to_string()),
             // 服务侧故障（模型未配置/推理失败/图像异常/内部错误）必须留痕
@@ -138,6 +146,7 @@ mod tests {
             AppError::Internal("".into()),
             AppError::Overload("".into()),
             AppError::TooLarge("".into()),
+            AppError::UnknownModel("".into()),
         ];
         let mut codes: Vec<&str> = samples.iter().map(|e| e.code()).collect();
         let dedup: std::collections::HashSet<&str> = codes.drain(..).collect();
@@ -150,6 +159,13 @@ mod tests {
         // 超限重试同一请求体必然再超限:客户端要缩图或调上限,不是重试
         let err = AppError::TooLarge("body".into());
         assert_eq!(err.code(), "too_large");
+        assert!(!err.retryable());
+    }
+
+    #[test]
+    fn unknown_model_should_have_stable_code_and_not_retryable() {
+        let err = AppError::UnknownModel("nope（可用动态槽: a, b）".into());
+        assert_eq!(err.code(), "unknown_model");
         assert!(!err.retryable());
     }
 
