@@ -2084,7 +2084,7 @@ rm /home/ncpe/dongit/argus/models/__f4_bad.onnx      # 清理
 mkdir -p /tmp/argus-f4/after
 # 与 Task 2 完全相同的 mask 与顺序；models 的 mask 剔除新增 dynamic_slots（golden 锁的是静态面）；
 # health 的 backpressure 已在两个时点统一清空（T2 的 mask 已含 .backpressure |= {}）
-curl -s "localhost:7049/health?deep=true" -H "X-API-Key: $KEY" | jq -S 'del(.version,.uptime_s) | .backpressure |= {}' > /tmp/argus-f4/after/health-deep.json
+curl -s "localhost:7049/health?deep=true" -H "X-API-Key: $KEY" | jq -S 'del(.version,.uptime_s,.dynamic_engines,.dynamic_slot_health) | .backpressure |= {}' > /tmp/argus-f4/after/health-deep.json
 curl -s "localhost:7049/models" -H "X-API-Key: $KEY" | jq -S 'del(.data.dynamic_slots)' > /tmp/argus-f4/after/models.json
 curl -s -X POST localhost:7049/detect -H "X-API-Key: $KEY" -F "file=@testdata/bus.jpg" | jq -S 'del(.data.inference_ms,.data.queue_ms)' > /tmp/argus-f4/after/detect.json
 curl -s -X POST localhost:7049/detect/batch -H "X-API-Key: $KEY" -H "content-type: application/json" \
