@@ -62,7 +62,7 @@
 
 | ID | 任务 | 状态 | 备注 |
 |---|---|---|---|
-| D1 | `POST /embed/text`（批量文本 → 归一化向量） | ✅ | 2026-10-21 实施完成：第 16 能力键 `text_embedding`（三件套 env：MODEL/TOKENIZER/DIM，加载期 dim 校验 fail-loud）；逐条 `embed()` 循环（T8 实测快于批且严格跨批逐位确定）；空字符串/超限/mode 非法/normalize=false 全部 HTTP 前置校验→`bad_request`（fork 兜底会漏码成 inference_failed——已测试锁定）；`pipeline=bge-small-zh-v1.5\|cls-pool-norm-v1\|maxlen512`；/models 带 `dim`；错误码零新增。E2E 全 6 项过（:7099 真模型）：dim/模长/逐位确定/语义 cos 0.4899>0.1927 与 python 参照一致/overload retryable/鉴权一致；HTTP 端到端 p95 3.6ms（预算 30ms）。测试 258→282 全绿。**生产 bundle 部署待做**（models/bge-small-zh-v1.5/ 两文件 + 三件套 env，部署后 model-inventory #19 状态更新） |
+| D1 | `POST /embed/text`（批量文本 → 归一化向量） | ✅ | 2026-10-21 实施完成：第 16 能力键 `text_embedding`（三件套 env：MODEL/TOKENIZER/DIM，加载期 dim 校验 fail-loud）；逐条 `embed()` 循环（T8 实测快于批且严格跨批逐位确定）；空字符串/超限/mode 非法/normalize=false 全部 HTTP 前置校验→`bad_request`（fork 兜底会漏码成 inference_failed——已测试锁定）；错误码零新增。E2E 全 6 项过（:7099 真模型）：dim/模长/逐位确定/语义判别/overload retryable/鉴权一致。测试 258→282 全绿。**部署模型换型（2026-10-21 双语 A/B）**：bge-small-zh-v1.5（纯中文）→ **jina-embeddings-v2-base-zh**（中英双语，768 维 mean 池化，Apache-2.0）——英文判别间隔 0.43 vs 0.17、中文间隔 0.42 vs 0.30、p95 18.4ms（预算 30ms 内）；`pipeline=jina-embeddings-v2-base-zh\|mean-pool-norm-v1\|maxlen512`；fork 增两输入导出支持（`49b8585`）。**生产 bundle 部署待做**（models/jina-embeddings-v2-base-zh/ 两文件 + 三件套 env DIM=768，部署后 model-inventory #19 状态更新） |
 | D2+ | 多语重排 / rerank / 跨模态 | 🚫 | 需求 §8 明确本期不做；fork 引擎结构已留正交扩展位（`engines/text/runner.rs` 复用） |
 
 ## 5. 与既有计划的关系

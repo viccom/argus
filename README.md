@@ -16,7 +16,7 @@
 | `POST /face/detect` | 人脸检测（bbox + 5 关键点；`min_face_px` bbox 短边下限 / `max_faces` 按置信度取前 N，默认均关） | YuNet |
 | `POST /face/recognize` | 人脸识别（128 维嵌入 + 余弦相似度比对；matches 含 5 关键点 landmarks 与 data.embed_dim；门控参数同 /face/detect，过滤发生在提向量之前） | SFace |
 | `POST /reid` | 行人重识别特征（multipart `file` + 可选 `boxes`=[[x1,y1,x2,y2],...] 像素框列表，缺省整图；逐框输出 512 维 L2 归一化 embedding，跨框相似度由消费方做余弦） | OSNet x1.0 |
-| `POST /embed/text` | 文本 Embedding（**JSON body** `{"texts":[".."],"mode?":"passage"\|"query","normalize?":true}`；texts 1..128 条、单条 ≤2000 字符、空字符串拒绝；逐条返回 512 维 **L2 归一化**向量——余弦退化为点积；`mode` 两值等价实现（bge v1.5 短查询无需指令前缀）；`normalize=false` 暂不支持（显式报错）；同输入逐位确定，换模型/池化/maxlen 则 `pipeline` 串变（向量失效判定键）；日志与错误消息不含输入文本） | bge-small-zh-v1.5 |
+| `POST /embed/text` | 文本 Embedding（**JSON body** `{"texts":[".."],"mode?":"passage"\|"query","normalize?":true}`；texts 1..128 条、单条 ≤2000 字符、空字符串拒绝；逐条返回 768 维 **L2 归一化**向量——余弦退化为点积，**中英双语**（中文优先）；`mode` 两值等价实现（jina v2 无需 query 指令前缀）；`normalize=false` 暂不支持（显式报错）；同输入逐位确定，换模型/池化/maxlen 则 `pipeline` 串变（向量失效判定键）；日志与错误消息不含输入文本） | jina-embeddings-v2-base-zh |
 | `POST /ocr` | OCR 文本检测 + 识别 | PP-OCRv5 |
 | `POST /license-plate` | 车牌检测 + 识别（mnet 关键点矫正 + LPRNet） | mnet / LPRNet |
 | `POST /qr` | 二维码检测 | WeChat QR |
@@ -130,7 +130,7 @@ cargo build --release --jobs 6
 | `depth_anything_v2_small.onnx` | [onnx-community/depth-anything-v2-small](https://huggingface.co/onnx-community/depth-anything-v2-small)（`onnx/model.onnx`） |
 | `segformer_b2_clothes.onnx` | [mattmdjaga/segformer_b2_clothes](https://huggingface.co/mattmdjaga/segformer_b2_clothes)(`onnx/model.onnx`,110MB 全量) |
 | `osnet_x1_0.onnx` | Qualcomm AI Hub 官方导出（[qualcomm/OSNet](https://huggingface.co/qualcomm/OSNet) 的 `release_assets.json` S3 直链，v0.62.2）。**zip 内为外置权重格式**（osnet.onnx + osnet.data），需 `onnx.load(load_external_data=True)` + `onnx.save` 内联为单文件；输入 `image [1,3,256,128]` 静态、输出 `embeddings [1,512]` 图内已 L2 |
-| `bge-small-zh-v1.5/`（model.onnx + tokenizer.json） | [Xenova/bge-small-zh-v1.5](https://huggingface.co/Xenova/bge-small-zh-v1.5)（`onnx/model.onnx` fp32 ~90MB + 根目录 `tokenizer.json`，MIT）。中文 BERT：三 int64 `[B,L]` 输入 + `last_hidden_state [B,L,512]`，**CLS 池化 + L2 在引擎侧做**（fork `engines/text/`）。两文件同目录部署，`pipeline=bge-small-zh-v1.5\|cls-pool-norm-v1\|maxlen512`。实测 p95 短句 2.61ms/61tok 9.00ms（ur5900，2026-10-21） |
+| `jina-embeddings-v2-base-zh/`（model.onnx + tokenizer.json） | [jinaai/jina-embeddings-v2-base-zh](https://huggingface.co/jinaai/jina-embeddings-v2-base-zh)（官方 `onnx/model.onnx` fp32 ~641MB + `tokenizer.json`，Apache-2.0）。**中英双语**（中文优先）JinaBERT：两 int64 输入（无 token_type_ids）+ `last_hidden_state [B,L,768]`，**mean 池化 + L2 在引擎侧做**（官方 1_Pooling 约定）。两文件同目录部署，`pipeline=jina-embeddings-v2-base-zh\|mean-pool-norm-v1\|maxlen512`。实测 p95 短句 18.4ms（ur5900，2026-10-21 双语 A/B 选型：英文判别间隔 0.43 击败 bge-small-zh 的 0.17，中文间隔 0.42 vs 0.30） |
 | `yolov8m-seg.onnx` | 本地导出：`YOLO('yolov8m-seg.pt').export(format='onnx', imgsz=640, opset=12)`（.pt 取自 `ultralytics/assets` release v8.3.0）。COCO 80 类实例分割，`[1,116,8400]` + proto `[1,32,160,160]`。服务 `/segmentation` |
 | `ppe_site_10cls.onnx` | [Hansung-Cho/yolov8-ppe-detection](https://huggingface.co/Hansung-Cho/yolov8-ppe-detection) `best.pt` 本地导出（同上参数）。10 类：Hardhat/Mask/NO-Hardhat/NO-Mask/NO-Safety Vest/Person/Safety Cone/Safety Vest/machinery/vehicle（含**违章反类**）。服务 `/ppe`。qualcomm gear_guard_net 因三输出自定义头弃用 |
 | `fire_smoke_2cls.onnx` | [mfranzon/fire-smoke-yolov8](https://huggingface.co/mfranzon/fire-smoke-yolov8) `fire_smoke_yolov8.pt` 本地导出（同上参数）。fire/smoke 两类。正样本实测置信度中等（0.52~0.62，nano 级），生产采用前建议再比选模型。服务 `/fire-smoke` |

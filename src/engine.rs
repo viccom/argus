@@ -36,6 +36,9 @@ pub const DETECTION_NMS_IOU: f32 = 0.45;
 pub const SEGMENTATION_CONFIDENCE: f32 = 0.25;
 /// 分割 NMS IoU 阈值(Ultralytics 默认 0.7;过小会得到比官方更多的重叠检出)。
 pub const SEGMENTATION_NMS_IOU: f32 = 0.7;
+/// 文本 Embedding 截断上限(含特殊 token)。jina-v2 支持到 8192,homepix 文档列
+/// 最长约几百字符,512 充裕;变更属预处理语义变化,须同步改 PIPELINE_TABLE 串。
+const TEXT_EMBEDDING_MAX_LENGTH: usize = 512;
 
 // 编译期锁定:下限低于 LOW_MODEL_CONFIDENCE 会让 SAHI 路径行为静默漂移
 const _: () = assert!(
@@ -65,7 +68,7 @@ pub const PIPELINE_TABLE: &[(&str, &str)] = &[
     ("pose", "yolov8-pose17-coco-v1"),
     ("depth", "depth-anything-v2-small-v1"),
     ("human_parsing", "segformer-b2-atr18-v1"),
-    ("text_embedding", "bge-small-zh-v1.5|cls-pool-norm-v1|maxlen512"),
+    ("text_embedding", "jina-embeddings-v2-base-zh|mean-pool-norm-v1|maxlen512"),
 ];
 
 /// 能力键 → 管线标识。未知能力返回空串（调用方以空串为"无溯源"信号）。
@@ -869,7 +872,17 @@ impl EngineManager {
                 for _ in 0..pool_size {
                     let (m, t) = (model.clone(), tokenizer.clone());
                     let engine = tokio::task::spawn_blocking(move || {
-                        TextEmbeddingEngine::new(&m, &t, device)
+                        // jina 官方约定：mean pooling + normalize（1_Pooling/config.json，
+                        // mean_tokens=true）。双语 A/B 选型见 fork 计划表（2026-10-21）。
+                        TextEmbeddingEngine::with_options(
+                            &m,
+                            &t,
+                            device,
+                            rust_onnx_infer::engines::text::PoolingKind::MaskedMean,
+                            true,
+                            TEXT_EMBEDDING_MAX_LENGTH,
+                            rust_onnx_infer::OnnxRuntimeConfig::defaults(),
+                        )
                     })
                     .await
                     .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;

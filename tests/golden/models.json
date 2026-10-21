@@ -143,7 +143,7 @@
         "enabled": true,
         "loaded": false,
         "models": [],
-        "pipeline": "bge-small-zh-v1.5|cls-pool-norm-v1|maxlen512"
+        "pipeline": "jina-embeddings-v2-base-zh|mean-pool-norm-v1|maxlen512"
       }
     }
   },

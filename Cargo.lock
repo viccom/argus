@@ -2183,7 +2183,7 @@ dependencies = [
 [[package]]
 name = "rust-onnx-infer"
 version = "0.2.0"
-source = "git+https://github.com/viccom/rust-onnx-infer.git?branch=master#4b4615e912978f3d9a6013b0c214af573ab0b703"
+source = "git+https://github.com/viccom/rust-onnx-infer.git?branch=master#49b8585c05955c37490ac2b2672542a21e4b54e4"
 dependencies = [
  "anyhow",
  "async-trait",
