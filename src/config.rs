@@ -272,7 +272,7 @@ impl Config {
     }
 
     /// slots.toml 有效路径：显式覆盖优先，否则 $ARGUS_MODELS_DIR/slots.toml。
-    // 生产消费者在 T5 注册表接入，当前仅测试引用——接入后移除本 allow（同 slots.rs）。
+    // 生产消费者在 T6 热重载 reload_once 接入，当前仅测试引用——接入后移除本 allow（同 slots.rs）。
     #[allow(dead_code)]
     pub fn slots_path(&self) -> PathBuf {
         self.slots_config

@@ -43,7 +43,7 @@
 | SAHI 需要具体类型：`predict_sliced_detection(engine: &dyn OnnxInferenceEngine<Output=Vec<Detection>>, single: &dyn SahiSinglePredictor<Detection>, ...)` | rust-onnx-infer `src/sahi/sliced_predictor.rs:39-45`；调用点 `src/routes/detection.rs:207-218` |
 | 检测 DTO 的类名来自引擎 `get_label_name(class_id)`；上游 `BaseOnnxEngine::set_labels` 为 pub | rust-onnx-infer `src/core/base.rs:458`、`:287`；`src/routes/detection.rs:29-37` |
 | `DetectCap` 三值枚举 + `key()` 提供能力键；`run_detect` 用 `cap.key()` 取溯源 | `src/routes/detection.rs:163-187`、`:252` |
-| `/detect/batch` 已有 `model: Option<String>` 字段，但传入即 400 拒绝；溯源硬编码 `"detection"` | `src/routes/batch.rs:27-36`、`:60-64`、`:100` |
+| `/detect/batch` 已有 `model: Option<String>` 字段，但传入即拒（bad_request 错误信封）；溯源硬编码 `"detection"` | `src/routes/batch.rs:27-36`、`:60-64`、`:100` |
 | `/models` 固定 15 项 `capabilities`；`loaded` 是单布尔 | `src/routes/models.rs:58`、`:190-203` |
 | `/health` 的 `engines` 与 `engine_health[].name` 都是 `&'static str` | `src/routes/health.rs:57-90`；`src/engine.rs:94-100` |
 | `EngineManager` 持有 `Config`（Clone）与 `DeviceType`；`AppState` 已 `#[derive(Clone)]` | `src/engine.rs:162-185`；`src/routes/health.rs:14-24` |
@@ -66,7 +66,7 @@
 
 ### 3.3 路由：三端点 + batch 的可选 `model`
 
-复用 `run_detect` 单一实现；`model` 缺省走原静态槽路径，行为逐字节不变。`model` 只接受**动态槽名**；静态能力键（15 个）保留，传静态名返回 400（提示用对应端点），避免跨端点语义混用。
+复用 `run_detect` 单一实现；`model` 缺省走原静态槽路径，行为逐字节不变。`model` 只接受**动态槽名**；静态能力键（15 个）保留，传静态名返回错误信封（HTTP 200 + status=error，`code="bad_request"`，提示用对应端点），避免跨端点语义混用。所有客户端错误的传输形态与既有契约一致（§5.2/§6：统一信封，不引入真 4xx）。
 
 ### 3.4 生效：watch 热重载
 
@@ -132,7 +132,7 @@ model=动态槽名
        → 槽级 provenance：ModelInfo { model: "文件名#hash12", pipeline: "detect-slot-v1" }
 
 model=保留字 / 未注册
-  └→ 400，data.code="unknown_model"，data.error 列出可用动态槽名（不泄露路径）
+  └→ 错误信封（HTTP 200 + status=error），data.code="unknown_model"，data.error 列出可用动态槽名（不泄露路径）
 ```
 
 `/detect/batch` 在请求入口解析一次槽名，逐图复用同一池与同一溯源；单图失败仍按现有语义隔离，不因动态槽改变批处理错误模型。
@@ -201,7 +201,7 @@ class_names = ["Person", "Hardhat", "NO-Hardhat", "Safety Vest", "NO-Safety Vest
 | `POST /detect` | multipart 文本 `model` | 静态 detection 槽 |
 | `POST /ppe` | multipart 文本 `model` | 静态 ppe 槽 |
 | `POST /fire-smoke` | multipart 文本 `model` | 静态 fire_smoke 槽 |
-| `POST /detect/batch` | JSON `model` | 静态 detection 槽（原“传入即 400”解除） |
+| `POST /detect/batch` | JSON `model` | 静态 detection 槽（原“传入即拒”解除） |
 
 ### 5.2 响应（只加不改）
 
@@ -250,9 +250,9 @@ class_names = ["Person", "Hardhat", "NO-Hardhat", "Safety Vest", "NO-Safety Vest
 ## 8. 测试策略
 
 1. **F0 特征测试（重构前）**：锁定静态 3 槽的懒加载、未配置错误、白名单先于文件系统、`pool_for` 回退、溯源缓存、`/models` 15 项、`/health` 形状；抓 golden。2. **F1 Registry 单测（`T=String` 假 builder）**：toml 解析/校验、保留字、重复槽、路径越界、add/remove/change diff、并发只建一份、失败退避、last-known-good。
-3. **F2 路由测试**：`model` 缺省无变化；未注册/保留字 400 + code；动态槽推理路径（单元层可 mock 池）；provenance 按槽解析；batch `model` 不再拒绝。
+3. **F2 路由测试**：`model` 缺省无变化；未注册/保留字错误信封 + code；动态槽推理路径（单元层可 mock 池）；provenance 按槽解析；batch `model` 不再拒绝。
 4. **F3 watcher**：mtime+size 变更检测；新增/删除/变更/非法/截断；停机退出。
-5. **F4 E2E（真实模型）**：用现有 `yolov8n.onnx` 注册别名槽 `alias-test`，走“加载→/detect?model=alias-test→溯源→touch slots.toml 改路径→热重载→删除→400”；坏模型退避；静态端点与 golden 逐字段一致。
+5. **F4 E2E（真实模型）**：用现有 `yolov8n.onnx` 注册别名槽 `alias-test`，走“加载→/detect?model=alias-test→溯源→touch slots.toml 改路径→热重载→删除→unknown_model 错误信封”；坏模型退避；静态端点与 golden 逐字段一致。
 6. **门禁**：`cargo test --jobs 6` 全绿 + `cargo clippy --all-targets --jobs 6` 零警告（共享机纪律）。
 
 ## 9. 实施阶段与门禁
@@ -271,7 +271,7 @@ class_names = ["Person", "Hardhat", "NO-Hardhat", "Safety Vest", "NO-Safety Vest
 
 1. `/detect`、`/ppe`、`/fire-smoke`、`/detect/batch` 不传 `model` 时，输出与 F0 golden 逐字段一致（排除推理耗时）；
 2. `slots.toml` 新增槽后 ≤ 2 个轮询周期（默认 6s）内 `/detect?model=<name>` 可用，无需重启；
-3. 删除槽后同一端点返回 400 + `unknown_model`，静态端点不受影响；
+3. 删除槽后同一端点返回 `unknown_model` 错误信封（HTTP 200 + status=error），静态端点不受影响；
 4. 同一槽的 N 个并发首请求只触发一次构建；
 5. 坏模型连续请求只尝试一次构建/30s，服务不崩溃；
 6. 槽名 `../x`、绝对路径越界、保留字、截断 toml 全部被拒绝且保留旧配置；
@@ -301,3 +301,4 @@ class_names = ["Person", "Hardhat", "NO-Hardhat", "Safety Vest", "NO-Safety Vest
 ## 13. 变更记录
 
 - 2026-10-21：初版设计获批。范围=检测族；注册=显式 `slots.toml`；路由=三端点+batch 可选 `model`；生效=watch 热重载。相对初稿采纳 8 项复核修正（C1-C8，见 §3.5）。
+- 2026-10-21：执行期勘误（T4 代码审查发现）：§2/§3.3/§4.2/§5.1/§8/§10 原文零散写的"400"与 §5.2/§6 的"HTTP 200 统一信封"矛盾——统一修正为错误信封表述，以 §5.2/§6（与既有 `AppError` 契约一致）为准。无行为变化。

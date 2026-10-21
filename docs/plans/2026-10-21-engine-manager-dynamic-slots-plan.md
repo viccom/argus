@@ -2172,7 +2172,7 @@ git worktree remove ../argus-dynamic-slots && git branch -d feat/dynamic-slots
 |---|---|---|
 | 1 | 无 model 时输出与 golden 逐字段一致 | T1 golden 断言 + T12 Step 6 diff |
 | 2 | 新槽 ≤2 周期可用 | T10 冒烟 + T12 Step 2/4 |
-| 3 | 删槽 400+unknown_model，静态不受影响 | T12 Step 4 |
+| 3 | 删槽 unknown_model 错误信封，静态不受影响 | T12 Step 4 |
 | 4 | 并发首请求只建一次 | T5 `resolve_should_build_once_under_concurrency` |
 | 5 | 坏模型 30s 退避不崩溃 | T5 backoff 单测 + T12 Step 5 |
 | 6 | 注入/截断全部拒绝且保留旧配置 | T3 解析单测 + T6 reload 单测 |
