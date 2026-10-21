@@ -29,5 +29,7 @@
 
 | 文档 | 用途 | 状态 |
 |---|---|---|
+| [model-inventory.md](model-inventory.md) | **实测模型清单**（现役/已验证/排除 26 项，含指纹、来源、实测数据、排除原因） | 权威（随实测回填） |
+| [model-download-candidates-20261021.md](model-download-candidates-20261021.md) | 互联网模型下载调研与两批实测记录（HF/魔搭渠道、A/B 数据、教训） | 参考（2026-10-21） |
 | [e2e-and-models.md](e2e-and-models.md) | E2E 冒烟与模型接入踩坑/判别法 | 参考（随新模型回填） |
 | [model-ecosystem-research.md](model-ecosystem-research.md) | 通用模型生态调研与吸纳评估 | 调研（2026-09，落地前需重新比选） |
