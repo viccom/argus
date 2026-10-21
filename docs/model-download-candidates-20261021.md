@@ -141,3 +141,18 @@
 1. **槽名禁连字符**：`fire-smoke-dfire` 被槽名正则拒绝（`^[a-z][a-z0-9_]{0,31}$`），且整份拒绝保留旧配置（fail-closed last-known-good 实战生效）——命名槽只能用 `[a-z0-9_]`。
 2. **镜像截断坑再实锤**：hf-mirror 对部分大文件按 8/10MiB 整块截断且 magic 头正常，必须大小对照源站。
 3. **gated 仓**：cazzz307 两仓（调研文档原推荐）需 HF 授权，镜像不豁免。
+
+## 九、第四批实测记录（2026-10-21，机动车品牌/型号识别专项）
+
+**检索结论（全网多渠道）**：车型识别（VMMR，Vehicle Make & Model Recognition）可用 ONNX 资源集中在 HF；魔搭无相关仓（iic 只有 DAMO 检测系与通用分类底座）。数据集谱系：VMMRdb（8949 类 品牌-型号-年份，最大）、Stanford Cars（196 类）、CompCars（136 类+属性）。**NVIDIA TAO VehicleMakeNet/VehicleTypeNet**（品牌/6 类车型）质量有背书但 NGC 下载需账号+TAO 栈，未纳入。
+
+| 模型 | 来源 | 形态 | 验证结果 |
+|---|---|---|---|
+| **vehicle-classifier（VMMRdb 8949 类）** | HF `Jordo23/vehicle-classifier`（非 gated） | **EfficientNet-B4 380×380**，logits `[batch,8949]`，附带 class_mapping.csv（类名/make/model 三列） | ✅ **语义验证通过**：zidane 轿车图 top1 `Acura MDX 2012` conf **0.529**（8949 类细粒度下高置信）；大巴域外图最高 0.026（判别力清晰） |
+| resnet50-cars（Stanford Cars 196 类） | HF `zededa/resnet50-cars`（非 gated） | ResNet50 224×224，`[batch,196]` | ⚠️ 前置门过（直跑正常）但 **ONNX 无 metadata 无类映射文件**——196 个索引无法落地为品牌型号名，可用性打折；zidane top1 conf 仅 0.048 也明显弱于上者 |
+
+**关键处置：官方 ONNX 缺 .data 外置权重文件**（仓内只放 927KB 图结构 + .pth，引用的 `vehicle_classifier_*.onnx.data` 不存在——HF 外置权重发布常见失误）。**处置=用仓内 .pth + timm 重建 EfficientNet-B4 自导完整内联 ONNX**（129MB，`vehicle-classifier-vmmrdb-full.onnx`），验证通过。timm 已补装进 yolo-rs/.venv（1.0.30）。
+
+**接入 argus 的形态判断**：分类模型走 **classification 静态槽**（`ARGUS_CLASSIFICATION_MODEL` + 重启；分类无动态槽）——但注意：① 现有 `/classify` 契约是 YOLOv8-cls 的 softmax+metadata 自动读名；EfficientNet 无 names metadata，需仓内 csv 做类名映射（引擎 `get_label_name` 会退化为数字，消费方按 csv 解）或二次烘焙 metadata；② 380×380 输入 vs 现役 224，warmup/预处理无冲突但延迟上升（B4 级 CPU 预估 200-400ms，待入槽实测）；③ 部署形态更契合"检测框 → 裁剪 → 分类"的两段式（G3），与现有 face_rec 的架构同构。
+
+**资产留存**：models-dl/（full.onnx 129MB + .pth 132MB + 官方残缺 onnx + csv 类表 + resnet50 96MB）。
