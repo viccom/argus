@@ -4,11 +4,6 @@
 //! 静态 3 槽（detection/ppe/fire_smoke 的 OnceCell）不在本模块管理——registry
 //! 纯增量（设计 C1），`slots.toml` 缺失时动态槽为空、行为零回归。
 
-// 本模块的生产消费方分两批接入：T7 已装配 EngineManager（registry/build/深检），
-// parse_slots_toml/file_fingerprint/reload_once 待 T10 watch_loop 接入——当前仅
-// 测试引用，bin 目标下 dead_code 属增量交付的已知中间态——全部就位后移除本 allow。
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -463,6 +458,38 @@ pub fn reload_once<T: Send + Sync + 'static>(
             tracing::error!("slots.toml 读取失败(保留旧配置): {e}");
             *last_fp = fp;
         }
+    }
+}
+
+/// 启动时解析 slots.toml（fail-closed：错误上抛，main 拒绝启动）。
+/// 文件缺失 → 空槽清单（零回归，设计 §4.3）。
+pub fn load_specs(config: &crate::config::Config) -> Result<Vec<SlotSpec>, String> {
+    let path = config.slots_path();
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            parse_slots_toml(&text, &config.models_dir).map_err(|e| format!("{} 无效: {e}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("读取 {} 失败: {e}", path.display())),
+    }
+}
+
+/// watcher 主循环（main 中 spawn；slots_watch_secs=0 不启动）。
+/// 纯内存应用无清理需求：进程退出时随 runtime 终止（设计风险表 P1——
+/// lifecycle 测试在 Task 11 锁定）。
+pub async fn watch_loop(
+    engines: std::sync::Arc<crate::engine::EngineManager>,
+    config: std::sync::Arc<crate::config::Config>,
+) {
+    let interval = Duration::from_secs(config.slots_watch_secs.max(1));
+    let mut last_fp = file_fingerprint(&config.slots_path());
+    tracing::info!(
+        "slots.toml 热重载已启动(周期 {interval:?}, 路径 {})",
+        config.slots_path().display()
+    );
+    loop {
+        tokio::time::sleep(interval).await;
+        reload_once(&engines.slots, &config, &mut last_fp);
     }
 }
 

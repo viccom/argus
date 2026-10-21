@@ -44,8 +44,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("已配置模型能力: {:?}", config.configured_engines());
 
     let engines = engine::EngineManager::new(config.clone());
+
+    // 动态槽：启动解析 fail-closed（配置错误拒绝启动）；文件缺失等价空槽
+    let slot_specs =
+        slots::load_specs(&config).map_err(|e| format!("slots 配置无效: {e}"))?;
+    if !slot_specs.is_empty() {
+        tracing::info!(
+            "动态槽已注册: {:?}",
+            slot_specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    engines.slots.apply_specs(slot_specs);
+
     let shutdown_timeout = std::time::Duration::from_secs(config.shutdown_timeout_secs);
-    let state = AppState::new(config, engines);
+    let state = AppState::new(config.clone(), engines);
+    if state.config.slots_watch_secs > 0 {
+        tokio::spawn(slots::watch_loop(
+            std::sync::Arc::clone(&state.engines),
+            std::sync::Arc::clone(&state.config),
+        ));
+    }
 
     let app = build_router(state, auth_token);
 
