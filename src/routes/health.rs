@@ -387,4 +387,72 @@ mod tests {
             assert!(text.contains(field), "浅检应含 {field}: {text}");
         }
     }
+
+    // ---- F0 golden：/health 形状锁定（动态化只允许 deep 增字段） ----
+
+    #[tokio::test]
+    async fn health_shallow_envelope_should_be_exact_golden() {
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        // volatile 字段替换哨兵后整体等值
+        body["version"] = json!("X");
+        body["uptime_s"] = json!(0);
+        body["backpressure"] = json!({
+            "max_concurrent": 0, "in_flight": 0, "queued_total": 0,
+            "rejected_total": 0, "acquire_timeout_total": 0,
+        });
+        assert_eq!(
+            body,
+            json!({
+                "status": "healthy", "device": "cpu", "engines": [],
+                "version": "X", "uptime_s": 0,
+                "backpressure": {
+                    "max_concurrent": 0, "in_flight": 0, "queued_total": 0,
+                    "rejected_total": 0, "acquire_timeout_total": 0,
+                },
+            }),
+            "浅检信封与 golden 不一致"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_deep_with_detection_configured_should_be_exact_golden() {
+        let config = Config {
+            detection_model: Some(std::path::PathBuf::from("/models/yolov8n.onnx")),
+            ..Default::default()
+        };
+        let mgr = EngineManager::new(config.clone());
+        let app = build_router(AppState::new(config, mgr), None);
+        let resp = app
+            .oneshot(Request::get("/health?deep=true").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        body["version"] = json!("X");
+        body["uptime_s"] = json!(0);
+        body["backpressure"] = json!({
+            "max_concurrent": 0, "in_flight": 0, "queued_total": 0,
+            "rejected_total": 0, "acquire_timeout_total": 0,
+        });
+        assert_eq!(
+            body,
+            json!({
+                "status": "healthy", "device": "cpu", "engines": [],
+                "version": "X", "uptime_s": 0,
+                "backpressure": {
+                    "max_concurrent": 0, "in_flight": 0, "queued_total": 0,
+                    "rejected_total": 0, "acquire_timeout_total": 0,
+                },
+                "configured": ["detection"],
+                "engine_health": [],
+            }),
+            "深检信封与 golden 不一致"
+        );
+    }
 }

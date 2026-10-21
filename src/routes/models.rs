@@ -432,4 +432,51 @@ mod tests {
             "detection 应带 pipeline: {text}"
         );
     }
+
+    // ---- F0 golden：/models 全信封形状锁定（动态化只允许"加字段"） ----
+
+    #[tokio::test]
+    async fn models_envelope_with_default_config_should_be_exact_golden() {
+        let app = crate::routes::health::build_router(test_state(Config::default()), None);
+        let resp = app
+            .oneshot(Request::get("/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = body_json(resp).await;
+        let mut expected = json!({"status": "success", "data": {"capabilities": {}}});
+        for key in [
+            "detection", "ppe", "fire_smoke", "classification", "obb", "segmentation",
+            "face_detection", "face_recognition", "reid", "ocr", "license_plate", "qr",
+            "pose", "depth", "human_parsing",
+        ] {
+            expected["data"]["capabilities"][key] = json!({
+                "configured": false, "enabled": true, "loaded": false, "models": [],
+            });
+        }
+        // 检测族三槽钉死（本次重构变更面），其余 12 个弱锁（防无关能力合法变更致脆）
+        expected["data"]["capabilities"]["detection"]["pipeline"] =
+            json!("yolov8-det640-letterbox-v1");
+        expected["data"]["capabilities"]["ppe"]["pipeline"] =
+            json!("yolov8-ppe10cls-det640-letterbox-v1");
+        expected["data"]["capabilities"]["fire_smoke"]["pipeline"] =
+            json!("yolov8-firesmoke2cls-det640-letterbox-v1");
+        let caps = body["data"]["capabilities"].as_object().expect("capabilities 应为对象");
+        let pipelines: Vec<&str> = caps
+            .iter()
+            .filter_map(|(k, v)| {
+                let p = v.get("pipeline")?.as_str()?;
+                assert!(!p.is_empty(), "{k} 的 pipeline 不得为空");
+                Some(p)
+            })
+            .collect();
+        let uniq: std::collections::HashSet<&str> = pipelines.iter().copied().collect();
+        assert_eq!(pipelines.len(), 15, "应为 15 项能力");
+        assert_eq!(uniq.len(), 15, "pipeline 必须互不相同");
+        expected["data"]["capabilities"].as_object_mut().unwrap().iter_mut().for_each(|(k, v)| {
+            if !matches!(k.as_str(), "detection" | "ppe" | "fire_smoke") {
+                v["pipeline"] = body["data"]["capabilities"][k]["pipeline"].clone();
+            }
+        });
+        assert_eq!(body, expected, "/models 默认信封与 golden 不一致");
+    }
 }

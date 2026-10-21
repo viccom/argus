@@ -1060,6 +1060,47 @@ mod tests {
         );
     }
 
+    // ---- F0 特征测试：静态检测族 3 槽行为锁定（动态化重构前的安全网） ----
+
+    #[tokio::test]
+    async fn ppe_loader_should_return_capability_disabled_when_not_whitelisted() {
+        // 模型路径指向不存在的文件:若错误是 CapabilityDisabled 则证明加载在
+        // 触碰文件系统之前就被拒绝;若返回加载失败/未配置,说明强制点放错了位置
+        let config = Config {
+            ppe_model: Some("/nonexistent/ppe.onnx".into()),
+            enabled_capabilities: Some(vec!["detection".to_string()]),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.ppe().await.err().expect("白名单外应返回错误");
+        assert!(matches!(err, AppError::CapabilityDisabled(_)), "实际: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn fire_smoke_loader_should_return_capability_disabled_when_not_whitelisted() {
+        // 模型路径指向不存在的文件:若错误是 CapabilityDisabled 则证明加载在
+        // 触碰文件系统之前就被拒绝;若返回加载失败/未配置,说明强制点放错了位置
+        let config = Config {
+            fire_smoke_model: Some("/nonexistent/fs.onnx".into()),
+            enabled_capabilities: Some(vec!["detection".to_string()]),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.fire_smoke().await.err().expect("白名单外应返回错误");
+        assert!(matches!(err, AppError::CapabilityDisabled(_)), "实际: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn static_detect_slots_should_error_model_not_configured_by_default() {
+        // 缺省配置下三槽都必须是 ModelNotConfigured（懒加载入口未破坏）。
+        // 注：EnginePool 未实现 Debug，取 err 后对 AppError（derive(Debug)）格式化
+        let mgr = EngineManager::new(Config::default());
+        for result in [mgr.detection().await, mgr.ppe().await, mgr.fire_smoke().await] {
+            let err = result.err().expect("缺省配置应返回错误");
+            assert!(matches!(err, AppError::ModelNotConfigured(_)), "实际: {err:?}");
+        }
+    }
+
     // ---- A4 溯源单测 ----
 
     #[test]
