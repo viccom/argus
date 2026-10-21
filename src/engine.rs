@@ -82,7 +82,7 @@ pub struct ModelInfo {
 }
 
 /// 计算模型文件的 sha256 前 12 位（hex）。文件不存在返回 None。
-fn sha256_prefix_12(path: &std::path::Path) -> Option<String> {
+pub(crate) fn sha256_prefix_12(path: &std::path::Path) -> Option<String> {
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(path).ok()?;
     let digest = Sha256::digest(&bytes);

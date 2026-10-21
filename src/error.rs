@@ -36,8 +36,6 @@ pub enum AppError {
 
     /// `model` 参数指向未注册/已删除的动态槽。消息内嵌可用槽名清单，
     /// 不泄露文件系统路径（槽名来自 URL，是外部输入）。
-    // 生产消费者在 T5 注册表接入，当前仅测试引用——接入后移除本 allow（同 slots.rs）。
-    #[allow(dead_code)]
     #[error("未知模型槽: {0}")]
     UnknownModel(String),
 }

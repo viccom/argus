@@ -8,9 +8,17 @@
 // bin 目标下 dead_code 属增量交付的已知中间态——接入后移除本 allow。
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use rust_onnx_infer::DeviceType;
+use tokio::sync::OnceCell;
 
 use crate::config::CAPABILITY_KEYS;
+use crate::engine::{sha256_prefix_12, EnginePool, ModelInfo};
+use crate::error::AppError;
 
 /// 动态槽管线标识（`data.pipeline`），与静态能力键的串不同族。
 pub const SLOT_PIPELINE: &str = "detect-slot-v1";
@@ -164,9 +172,234 @@ fn best_canonicalize(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// 槽构建失败退避窗口（生产值）。
+pub const SLOT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
+/// 单个动态槽：懒加载池 + 溯源缓存 + 失败退避状态。
+pub struct Slot<T> {
+    pub spec: SlotSpec,
+    pool: OnceCell<Arc<EnginePool<T>>>,
+    model_info_cache: OnceCell<ModelInfo>,
+    last_error: std::sync::Mutex<Option<String>>,
+    /// 失败退避截止（epoch 毫秒）；0 = 无退避（从未失败）。
+    next_retry_at_ms: std::sync::atomic::AtomicU64,
+}
+
+impl<T> Slot<T> {
+    fn new(spec: SlotSpec) -> Self {
+        Self {
+            spec,
+            pool: OnceCell::new(),
+            model_info_cache: OnceCell::new(),
+            last_error: std::sync::Mutex::new(None),
+            next_retry_at_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub fn loaded(&self) -> bool {
+        self.pool.initialized()
+    }
+
+    /// 已加载池（未加载返回 None；深检与快路径用）。
+    pub fn pool(&self) -> Option<Arc<EnginePool<T>>> {
+        self.pool.get().cloned()
+    }
+
+    /// 槽级溯源：`文件名#sha256 前 12 位` + `detect-slot-v1`，首查后缓存。
+    /// 文件不可读返回 None（响应 model/pipeline 为 null，与静态未配置能力同语义）。
+    pub async fn model_info(&self) -> Option<ModelInfo> {
+        if let Some(hit) = self.model_info_cache.get() {
+            return Some(hit.clone());
+        }
+        let path = self.spec.model_path.clone();
+        let computed = tokio::task::spawn_blocking(move || {
+            let name = path.file_name()?.to_string_lossy().to_string();
+            let hash = sha256_prefix_12(&path)?;
+            Some(ModelInfo { model: format!("{name}#{hash}"), pipeline: SLOT_PIPELINE })
+        })
+        .await
+        .ok()
+        .flatten()?;
+        let _ = self.model_info_cache.set(computed.clone());
+        Some(computed)
+    }
+}
+
+/// 槽构建函数：接收规格与设备，产出引擎池。EngineManager 注入真实构建
+/// （T=DetectionEngine），单测注入假 builder（T=String），不依赖模型文件。
+pub type SlotBuildFn<T> =
+    Arc<dyn Fn(&SlotSpec, DeviceType) -> Result<EnginePool<T>, AppError> + Send + Sync>;
+
+/// 动态槽注册表。生产实例是 `SlotRegistry<DetectionEngine>`（装配在
+/// `EngineManager`，见 engine.rs）；单测注入假 builder（T=String）覆盖
+/// 并发/退避/diff 行为，不依赖模型文件。
+pub struct SlotRegistry<T> {
+    slots: std::sync::RwLock<HashMap<String, Arc<Slot<T>>>>,
+    /// 构建互斥（1 permit）：坏模型风暴时全局最多一个构建在跑。
+    build_sem: Arc<tokio::sync::Semaphore>,
+    device: DeviceType,
+    build_fn: SlotBuildFn<T>,
+    retry_backoff: Duration,
+}
+
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+impl<T: Send + Sync + 'static> SlotRegistry<T> {
+    pub fn new(device: DeviceType, build_fn: SlotBuildFn<T>) -> Self {
+        Self {
+            slots: std::sync::RwLock::new(HashMap::new()),
+            build_sem: Arc::new(tokio::sync::Semaphore::new(1)),
+            device,
+            build_fn,
+            retry_backoff: SLOT_RETRY_BACKOFF,
+        }
+    }
+
+    /// 热重载 diff 应用：消失移除、新增插入、变更整体替换为未加载新 Slot；
+    /// 未变槽原样保留（已加载池与在途请求不受影响）。
+    /// （T5 即实现真逻辑——T6 只补 diff 测试，不再动这段。）
+    pub fn apply_specs(&self, specs: Vec<SlotSpec>) {
+        let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
+        slots.retain(|name, _| specs.iter().any(|s| &s.name == name));
+        for spec in specs {
+            let unchanged = slots.get(&spec.name).map(|s| s.spec == spec).unwrap_or(false);
+            if !unchanged {
+                slots.insert(spec.name.clone(), Arc::new(Slot::new(spec)));
+            }
+        }
+    }
+
+    /// 按名取槽（不触发构建）。
+    pub fn slot(&self, name: &str) -> Option<Arc<Slot<T>>> {
+        self.slots
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    /// 全部槽快照，按槽名排序（/models、深检用）。
+    pub fn slots_snapshot(&self) -> Vec<Arc<Slot<T>>> {
+        let mut v: Vec<_> = self
+            .slots
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.spec.name.cmp(&b.spec.name));
+        v
+    }
+
+    /// 请求路径解析：快路径命中已加载池；未加载则退避检查 → 构建互斥 → 构建。
+    pub async fn resolve(&self, name: &str) -> Result<(Arc<Slot<T>>, Arc<EnginePool<T>>), AppError> {
+        let slot = self
+            .slot(name)
+            .ok_or_else(|| AppError::UnknownModel(self.unknown_model_message(name)))?;
+        if let Some(pool) = slot.pool() {
+            return Ok((slot, pool));
+        }
+        // 失败退避：窗口内不重试（防坏模型请求风暴）
+        Self::check_backoff(&slot)?;
+        // 构建互斥：排队后复检——并发首请求只建一份
+        let _build_permit = self
+            .build_sem
+            .acquire()
+            .await
+            .map_err(|_| AppError::Internal("槽构建信号量已关闭".into()))?;
+        // 排队期间首个失败者可能已设置退避：复检后拒绝重复失败构建
+        //（全局 1-permit 下，排队者串行失败重建会阻塞其它合法槽的首建）
+        Self::check_backoff(&slot)?;
+        if let Some(pool) = slot.pool() {
+            return Ok((slot, pool));
+        }
+        let spec = slot.spec.clone();
+        let build_fn = Arc::clone(&self.build_fn);
+        let device = self.device;
+        let result = tokio::task::spawn_blocking(move || build_fn(&spec, device))
+            .await
+            .map_err(|e| AppError::Internal(format!("槽构建任务失败: {e}")))?;
+        match result {
+            Ok(pool) => {
+                let pool = Arc::new(pool);
+                // set 必须先于断言执行：debug_assert! 在 release 下不求值参数，
+                // 若内联 set 则 release 永远不缓存池（行为回退为每次重建）
+                let set_ok = slot.pool.set(Arc::clone(&pool)).is_ok();
+                debug_assert!(set_ok, "set 不败依赖 build_sem=1 permit");
+                Ok((slot, pool))
+            }
+            Err(e) => {
+                *slot.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                slot.next_retry_at_ms.store(
+                    now_epoch_ms() + self.retry_backoff.as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                tracing::error!(
+                    "动态槽 {} 构建失败（退避 {:?}）: {e}",
+                    slot.spec.name, self.retry_backoff
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// 失败退避检查：窗口内拒绝并报告上次错误与剩余等待毫秒数。
+    /// resolve 两处调用（acquire 前后各一次），acquire 后的复检确保已排队
+    /// 请求不重复触发失败构建。
+    fn check_backoff(slot: &Slot<T>) -> Result<(), AppError> {
+        let now = now_epoch_ms();
+        let until = slot.next_retry_at_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if now >= until {
+            return Ok(());
+        }
+        let last = slot
+            .last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| "未知错误".into());
+        Err(AppError::Internal(format!(
+            "动态槽 {} 此前加载失败（{last}），退避中，{}ms 后可重试",
+            slot.spec.name,
+            until - now
+        )))
+    }
+
+    fn unknown_model_message(&self, name: &str) -> String {
+        let names = self
+            .slots_snapshot()
+            .iter()
+            .map(|s| s.spec.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if names.is_empty() {
+            format!("{name}（当前无已注册动态槽，请检查 slots.toml）")
+        } else {
+            format!("{name}（可用动态槽: {names}）")
+        }
+    }
+
+    /// 单测专用：缩短退避窗口。
+    #[cfg(test)]
+    pub(crate) fn set_retry_backoff_for_test(&mut self, d: Duration) {
+        self.retry_backoff = d;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::engine::EnginePool;
+    use crate::error::AppError;
 
     /// 每个测试独立的临时 models 目录（含一个真实存在的假模型文件）。
     fn tmp_models(tag: &str) -> PathBuf {
@@ -314,5 +547,132 @@ mod tests {
             "未知字段 warn 后忽略（向前兼容）");
         assert!(parse_slots_toml("", &dir).unwrap().is_empty());
         assert!(parse_slots_toml("[other]\nx = 1\n", &dir).unwrap().is_empty(), "无 [slots] 段 = 空清单");
+    }
+
+    // ---- SlotRegistry 核心（T=String 假 builder，不依赖模型文件） ----
+
+    fn counting_builder() -> (Arc<AtomicUsize>, SlotBuildFn<String>) {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&count);
+        let f = move |spec: &SlotSpec, _d| {
+            c.fetch_add(1, Ordering::SeqCst);
+            // 放大竞争窗口：并发首请求若未互斥，会明显多次构建
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(EnginePool::new(vec![Arc::new(spec.name.clone())]))
+        };
+        (count, Arc::new(f))
+    }
+
+    fn one_spec(dir: &Path, name: &str) -> SlotSpec {
+        parse_slots_toml(&format!("[slots.{name}]\nmodel = \"m.onnx\"\n"), dir)
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resolve_should_build_once_under_concurrency() {
+        let dir = tmp_models("registry-concur");
+        let (count, build) = counting_builder();
+        let registry = Arc::new(SlotRegistry::new(
+            rust_onnx_infer::DeviceType::from_name("cpu"), build,
+        ));
+        registry.apply_specs(vec![one_spec(&dir, "concur")]);
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = Arc::clone(&registry);
+            handles.push(tokio::spawn(async move { r.resolve("concur").await }));
+        }
+        for h in handles {
+            h.await.unwrap().expect("应构建成功");
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1, "8 个并发首请求必须只构建一次");
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_slot_should_return_unknown_model_error() {
+        let (_c, build) = counting_builder();
+        let registry = SlotRegistry::new(rust_onnx_infer::DeviceType::from_name("cpu"), build);
+        let err = registry.resolve("nope").await.err().expect("未注册槽应报错");
+        assert!(matches!(err, AppError::UnknownModel(ref msg) if msg.contains("无已注册动态槽")), "实际: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn failed_build_should_backoff_and_retry_after_window() {
+        let dir = tmp_models("registry-backoff");
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&count);
+        let registry = SlotRegistry::new(
+            rust_onnx_infer::DeviceType::from_name("cpu"),
+            Arc::new(move |_: &SlotSpec, _d| -> Result<EnginePool<String>, AppError> {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(AppError::Internal("坏模型".into()))
+            }),
+        );
+        // 测试用短退避（生产默认 30s，见 SLOT_RETRY_BACKOFF）
+        let mut registry = registry;
+        registry.set_retry_backoff_for_test(Duration::from_millis(80));
+        registry.apply_specs(vec![one_spec(&dir, "bad")]);
+
+        assert!(registry.resolve("bad").await.is_err(), "首次构建失败");
+        let err = registry.resolve("bad").await.err().expect("退避窗口内应拒绝");
+        assert!(err.to_string().contains("退避"), "应提示退避中: {err}");
+        assert_eq!(count.load(Ordering::SeqCst), 1, "退避窗口内不得重试构建");
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(registry.resolve("bad").await.is_err(), "窗口过期后重试仍失败（模型还是坏的）");
+        assert_eq!(count.load(Ordering::SeqCst), 2, "窗口过期后应重试一次");
+    }
+
+    #[tokio::test]
+    async fn concurrent_failures_should_build_once_and_backoff_the_rest() {
+        // 回归：acquire 后的退避复检——8 个并发请求打到坏槽，只有首个真的
+        // 构建，其余 7 个在排队等到 permit 后被退避拒绝（否则 1-permit 下
+        // 排队者串行失败重建，还会阻塞其它合法槽的首建）
+        let dir = tmp_models("registry-fail-storm");
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&count);
+        let mut registry = SlotRegistry::new(
+            rust_onnx_infer::DeviceType::from_name("cpu"),
+            Arc::new(move |_: &SlotSpec, _d| -> Result<EnginePool<String>, AppError> {
+                c.fetch_add(1, Ordering::SeqCst);
+                // 放大竞争窗口：让其余请求充分排队后再失败设置退避
+                std::thread::sleep(Duration::from_millis(50));
+                Err(AppError::Internal("坏模型".into()))
+            }),
+        );
+        // 拉长退避窗口（10s），避免与 50ms 构建延迟产生时序竞争；测试在
+        // 全部句柄完成后即返回，不会真等满窗口
+        registry.set_retry_backoff_for_test(Duration::from_secs(10));
+        registry.apply_specs(vec![one_spec(&dir, "storm")]);
+        let registry = Arc::new(registry);
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = Arc::clone(&registry);
+            handles.push(tokio::spawn(async move { r.resolve("storm").await }));
+        }
+        let mut backoff_errs = 0;
+        for h in handles {
+            let err = h.await.unwrap().err().expect("坏槽必须全部失败");
+            if err.to_string().contains("退避") {
+                backoff_errs += 1;
+            }
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1, "8 个并发失败请求必须只构建一次");
+        assert_eq!(backoff_errs, 7, "其余 7 个应得到退避错误，实际 {backoff_errs} 个");
+    }
+
+    #[tokio::test]
+    async fn slot_model_info_should_report_filename_hash_and_slot_pipeline() {
+        let dir = tmp_models("registry-prov");
+        let (_c, build) = counting_builder();
+        let registry = SlotRegistry::new(rust_onnx_infer::DeviceType::from_name("cpu"), build);
+        registry.apply_specs(vec![one_spec(&dir, "prov")]);
+        let slot = registry.slot("prov").unwrap();
+        let mi = slot.model_info().await.expect("文件存在应可解析");
+        assert!(mi.model.starts_with("m.onnx#") && mi.model.len() == "m.onnx#".len() + 12, "实际: {}", mi.model);
+        assert_eq!(mi.pipeline, SLOT_PIPELINE);
     }
 }
