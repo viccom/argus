@@ -156,3 +156,25 @@
 **接入 argus 的形态判断**：分类模型走 **classification 静态槽**（`ARGUS_CLASSIFICATION_MODEL` + 重启；分类无动态槽）——但注意：① 现有 `/classify` 契约是 YOLOv8-cls 的 softmax+metadata 自动读名；EfficientNet 无 names metadata，需仓内 csv 做类名映射（引擎 `get_label_name` 会退化为数字，消费方按 csv 解）或二次烘焙 metadata；② 380×380 输入 vs 现役 224，warmup/预处理无冲突但延迟上升（B4 级 CPU 预估 200-400ms，待入槽实测）；③ 部署形态更契合"检测框 → 裁剪 → 分类"的两段式（G3），与现有 face_rec 的架构同构。
 
 **资产留存**：models-dl/（full.onnx 129MB + .pth 132MB + 官方残缺 onnx + csv 类表 + resnet50 96MB）。
+
+## 十、工地车型清单专项评估（2026-10-21，27 类工程机械识别可行性）
+
+**需求**：用户整理了 27 类工地常用车型（挖掘机/推土机/起重机/自卸车/叉车/摊铺机/压实机等），寻求准确识别的现成模型。
+
+**全网检索结论**：**不存在覆盖该 27 类的现成 ONNX 模型**。工地机械识别的公开资源格局：
+- 学术数据集多为 5-12 类（excavator/loader/dozer/roller/backhoe 为主，ASCE 2023 九类、Mendeley 2025 十二类、MDPI 2024 五类土方），无 27 类全覆盖；
+- Roboflow Universe 有大量单场景小数据集（多为 3-19 类、几百到几千张，质量参差，权重需 API key 且许可不一）；
+- HF keremberke 系列（roboflow2huggingface 官方镜像，非 gated）只有叉车相关：`yolov8s-forklift-detection`（forklift+person 双类，mAP50 0.851）；
+- 中文社区（CSDN/腾讯云）有 8 类/27000 张等数据集售卖贴，无直接权重下载。
+
+**本批实测**：
+| 模型 | 来源 | 结果 |
+|---|---|---|
+| forklift-yolov8s.onnx（forklift+person 双类） | HF `keremberke/yolov8s-forklift-detection`（mAP50 0.851） | ✅ 入槽全过：溯源 `95dca951a55f`、bus.jpg 检出 person×4 + forklift@0.36（人工判读 bus 图左下黄色物体确有歧义性）、类名注入生效、深检 ok。清单 #15 叉车可部分覆盖（含人车同框） |
+
+**27 类落地路线评估（结论：检测槽底座已就绪，缺的是数据）**：
+1. **可行路线（推荐）**：按清单整理业务图集（每类 ≥300-500 张实拍，覆盖俯视/侧视/远近）→ 用现役 venv ultralytics 训练 YOLOv8s 检测模型（单模型 27 类）→ 导出后 slots.toml 入槽（零代码发版）。工地监控摄像头固定机位，采集成本低；近似公开数据集（5-12 类）可做预训练起点再迁移。
+2. **部分覆盖捷径**：高频核心类（挖掘机/推土机/起重机/自卸车/叉车 5 类）可先组合 keremberke 叉车件 + Roboflow 公开数据集自训，其余低频类后续补。
+3. **不推荐**：拼多个单类模型（槽多、维护碎、类间冲突）；纯分类方案（无法定位，工地图多目标）。
+
+**资产留存**：forklift-yolov8s.onnx/pt 存 models-dl/，onnx 已入 models/。
