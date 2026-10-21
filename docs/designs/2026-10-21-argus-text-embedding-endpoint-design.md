@@ -1,6 +1,6 @@
 # argus 文本 Embedding 端点设计（批 D1：`POST /embed/text`）
 
-> 状态：implemented（2026-10-21；计划 D0-D6 全销账，测试 258→282，E2E 6 项过；生产 bundle 部署待做）
+> 状态：implemented（2026-10-21；计划 D0-D6 全销账，测试 258→282，E2E 6 项过；生产 bundle 已部署 argus-0.1.0-c9ef409，2026-10-22 验收全过）
 > 日期：2026-10-21
 > 基线：argus @ `1b9adaa`（动态槽已合并 + 模型清单制度）；rust-onnx-infer @ `4b4615e`（`fdd7beb` 引擎 + 审查修正，已 push）
 > 权威源：需求 homepix 批 D1（`text-embedding-requirements.md`，homepix 侧 2026-10-21 成文）；引擎侧设计 [2026-10-21-rust-onnx-infer-text-embedding-design.md](2026-10-21-rust-onnx-infer-text-embedding-design.md)（implemented）；实施进度 [plans/2026-10-21-argus-text-embedding-endpoint-plan.md](../plans/2026-10-21-argus-text-embedding-endpoint-plan.md)；端点/env/模型表 **README.md**

@@ -1,6 +1,6 @@
 # argus 文本 Embedding 端点实施计划（批 D1）
 
-> 状态：implemented（D0-D6 全部完成，2026-10-21；测试 258→282 全绿，E2E 6 项全过；生产 bundle 部署待做）
+> 状态：implemented（D0-D6 全部完成，2026-10-21；测试 258→282 全绿，E2E 6 项全过；生产 bundle 已部署 argus-0.1.0-c9ef409，2026-10-22 验收全过）
 > 日期：2026-10-21
 > 基线：argus @ `1b9adaa`（测试基线 255+3=258 全绿）；rust-onnx-infer 正式指向 `4b4615e`
 > 权威源：设计 [designs/2026-10-21-argus-text-embedding-endpoint-design.md](../designs/2026-10-21-argus-text-embedding-endpoint-design.md)；需求 homepix 批 D1
