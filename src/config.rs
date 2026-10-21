@@ -86,6 +86,10 @@ pub struct Config {
     /// 背景：内存被 ORT 每 session 运行时开销主导，ocr + human_parsing 两项占全量
     /// 83%（12.4GB 中 ~10.3GB）；把这两项与 depth 设 1 即可拿回大部分内存。
     pub pools: HashMap<String, usize>,
+    /// slots.toml 显式路径覆盖（`ARGUS_SLOTS_CONFIG`）。None = 默认 `$ARGUS_MODELS_DIR/slots.toml`。
+    pub slots_config: Option<PathBuf>,
+    /// slots.toml 轮询周期秒（`ARGUS_SLOTS_WATCH_SECS`）。默认 3；0 = 关闭热重载（仅启动时加载）。
+    pub slots_watch_secs: u64,
     /// 能力白名单（`ARGUS_ENABLED_CAPABILITIES`，逗号分隔能力键）。
     /// `None` = 未设置 = 现有行为（凡模型路径已配置即启用），零回归。
     /// 白名单外的能力在 loader 入口即被拒绝：不触碰文件系统、不创建 session。
@@ -126,6 +130,8 @@ impl Default for Config {
             human_parsing_model: None,
             warmup_sizes: HashMap::new(),
             pools: HashMap::new(),
+            slots_config: None,
+            slots_watch_secs: 3,
             enabled_capabilities: None,
         }
     }
@@ -186,6 +192,13 @@ impl Config {
                 cfg.acquire_timeout_ms = n;
             }
         }
+
+        if let Ok(v) = env::var("ARGUS_SLOTS_WATCH_SECS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.slots_watch_secs = n;
+            }
+        }
+        cfg.slots_config = env_path("ARGUS_SLOTS_CONFIG");
 
         cfg.detection_model = env_path("ARGUS_DETECTION_MODEL");
         cfg.ppe_model = env_path("ARGUS_PPE_MODEL");
@@ -256,6 +269,15 @@ impl Config {
     /// 能力级实例池大小；未设置（或非法）回退全局 `engine_pool`。
     pub fn pool_for(&self, capability: &str) -> usize {
         self.pools.get(capability).copied().unwrap_or(self.engine_pool)
+    }
+
+    /// slots.toml 有效路径：显式覆盖优先，否则 $ARGUS_MODELS_DIR/slots.toml。
+    // 生产消费者在 T5 注册表接入，当前仅测试引用——接入后移除本 allow（同 slots.rs）。
+    #[allow(dead_code)]
+    pub fn slots_path(&self) -> PathBuf {
+        self.slots_config
+            .clone()
+            .unwrap_or_else(|| self.models_dir.join("slots.toml"))
     }
 
     /// 能力键 → 模型文件路径列表（A4 溯源用）。单模型能力 1 项；OCR/车牌 2 项；
@@ -718,5 +740,40 @@ mod tests {
         unsafe {
             env::remove_var("ARGUS_ENABLED_CAPABILITIES");
         }
+    }
+
+    // ---- 动态槽配置（slots.toml 路径与热重载周期） ----
+
+    #[test]
+    fn slots_defaults_should_be_models_dir_and_3s_watch() {
+        let config = Config::default();
+        assert_eq!(config.slots_config, None);
+        assert_eq!(config.slots_watch_secs, 3);
+        assert_eq!(config.slots_path(), PathBuf::from("./models/slots.toml"));
+    }
+
+    #[test]
+    fn from_env_should_parse_slots_overrides() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_SLOTS_CONFIG", "/srv/argus/slots.toml");
+            env::set_var("ARGUS_SLOTS_WATCH_SECS", "5");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.slots_config.as_deref(), Some(std::path::Path::new("/srv/argus/slots.toml")));
+        assert_eq!(config.slots_watch_secs, 5);
+        assert_eq!(config.slots_path(), PathBuf::from("/srv/argus/slots.toml"));
+        unsafe {
+            env::remove_var("ARGUS_SLOTS_CONFIG");
+            env::remove_var("ARGUS_SLOTS_WATCH_SECS");
+        }
+    }
+
+    #[test]
+    fn from_env_should_keep_zero_watch_to_disable_hot_reload() {
+        let _guard = env_lock();
+        unsafe { env::set_var("ARGUS_SLOTS_WATCH_SECS", "0"); }
+        assert_eq!(Config::from_env().slots_watch_secs, 0, "0 必须原样保留（关闭 watcher）");
+        unsafe { env::remove_var("ARGUS_SLOTS_WATCH_SECS"); }
     }
 }
