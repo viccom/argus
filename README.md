@@ -65,7 +65,7 @@ warmup_size = [640, 640]            # 可选：预热 dummy 尺寸，两维均 3
   ```
 - **错误码**：`model` 指向未注册/已删除槽 → `unknown_model`（信封内列可用槽名，不泄露路径）；`model` 传静态能力键（如 `ppe`）→ `bad_request`（提示改用对应端点，不跨端点转发）。启动时 `slots.toml` 非法 → **拒绝启动**（fail-closed）。
 - **热重载**：watcher 轮询 `slots.toml` 指纹（mtime 纳秒 + size），默认 3s 周期，新增/修改/删除槽 ≤2 个周期生效；解析失败保留 last-known-good（不清空）。**已加载槽换模型须换 spec（改 `model` 路径）或重启**——同路径替换模型文件后 `touch slots.toml` 只会触发重解析，但槽规格未变时已加载的池不重建，仍用旧模型；touch 仅对**未加载**槽生效（其首次构建会读到新文件）。模型文件替换本身建议原子操作（临时文件 + `mv`）避免读到半成品。
-- **观测**：`/models` 的 `data.dynamic_slots.<name>.{configured,loaded,model_file,pipeline}`（15 项 `capabilities` 不变）；`/health?deep=true` 的 `dynamic_engines` + `dynamic_slot_health`（`engines`/`engine_health` 不变）。槽懒加载：首次请求才构建引擎，`loaded=false` 表示已注册未加载。
+- **观测**：`/models` 的 `data.dynamic_slots.<name>.{configured,loaded,model_file,pipeline}`（17 项 `capabilities` 不变）；`/health?deep=true` 的 `dynamic_engines` + `dynamic_slot_health`（`engines`/`engine_health` 不变）。槽懒加载：首次请求才构建引擎，`loaded=false` 表示已注册未加载。
 - **回滚**：删 `slots.toml`（或 `ARGUS_SLOTS_CONFIG` 指向不存在的路径）即清空动态槽，静态能力不受影响；二进制回滚到 2026-10-21 以前则 `slots.toml` 被忽略（新字段不被旧代码读取）。
 - **生产提示**：`slots.toml` 默认落在 gitignore 的 `models/` 下（部署数据）。双实例（:7042/:7043）各自懒加载同一槽会双份内存——峰值由懒加载 + 替换不预载最小化，但同槽双加载仍须计入预算。**当前生产未激活**（无 slots.toml，零回归）；激活前需先在两个实例的 models 目录部署 slots.toml 并评估内存。
 

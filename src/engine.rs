@@ -412,7 +412,7 @@ impl EngineManager {
     // dynamic_loaded/dynamic_slot_health 由 /health deep 与 /models 消费（T9 接线）。
 
     /// 检测族动态槽解析（三端点与 /detect/batch 的 `model` 参数入口）。
-    /// 保留字（15 能力键）→ BadRequest 提示改用对应端点；白名单按 detection
+    /// 保留字（17 能力键）→ BadRequest 提示改用对应端点；白名单按 detection
     /// 门控（设计 §4.6）；未注册槽 → UnknownModel（列出可用槽名，不泄露路径）。
     pub async fn resolve_dynamic_slot(
         &self,

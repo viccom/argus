@@ -234,6 +234,21 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
             ),
         ),
     ];
+    // 防漂移：键集合（非仅数量）必须与 CAPABILITY_KEYS 一致——数组长度类型只防
+    // 长度，键名拼错/漏项只能靠集合比较抓（2026-10-22 审查 C10）
+    debug_assert_eq!(
+        {
+            let mut ks: Vec<&str> = entries.iter().map(|(n, _)| *n).collect();
+            ks.sort_unstable();
+            ks
+        },
+        {
+            let mut ks: Vec<&str> = crate::config::CAPABILITY_KEYS.to_vec();
+            ks.sort_unstable();
+            ks
+        },
+        "models.rs entries 键集合必须与 CAPABILITY_KEYS 一致"
+    );
     entries
         .into_iter()
         .map(|(name, cm)| {
@@ -415,7 +430,7 @@ mod tests {
 
     #[test]
     fn text_embedding_dim_should_be_skipped_when_unset() {
-        // 未配置（dim=None）时序列化不出现 dim 字段——其余 15 项形状逐字节不变
+        // 未配置（dim=None）时序列化不出现 dim 字段——其余 16 项形状逐字节不变
         let caps = capability_models(&Config::default(), &[]);
         let raw = serde_json::to_value(&caps["text_embedding"]).unwrap();
         assert!(raw.get("dim").is_none(), "None 必须跳过序列化: {raw}");
