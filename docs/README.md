@@ -27,6 +27,7 @@
 | [plans/2026-10-21-argus-text-embedding-endpoint-plan.md](plans/2026-10-21-argus-text-embedding-endpoint-plan.md) | argus 批 D1 端点实施计划（D0-D6；E2E 验收 6 项） | 已完成（2026-10-21；D0-D6 全销账） |
 | [plans/2026-10-21-homepix-embed-text-verification-plan.md](plans/2026-10-21-homepix-embed-text-verification-plan.md) | 批 D1 交付的 homepix 侧验证计划（V1-V8 用例 + 硬条件映射 + 一键脚本 + 自起实例附录） | approved（2026-10-21，交付 homepix Coding Agent 执行） |
 | [plans/2026-10-22-text-reranking-and-model-swap-plan.md](plans/2026-10-22-text-reranking-and-model-swap-plan.md) | reranking + 模型对组合实施计划（T0-T10：fork 增量 → argus 能力/端点 → 双对 E2E → 生产部署） | 已完成（2026-10-22；T0-T10 全销账 + 审查修复） |
+| [plans/2026-10-22-homepix-rerank-verification-plan.md](plans/2026-10-22-homepix-rerank-verification-plan.md) | 批 D2 交付的 homepix 侧指南：/rerank 契约 + 两段式检索（embed 召回→rerank 精排）+ 实测汇总 + 一键脚本 V2-V5 | approved（2026-10-22，生产实测 16/16 + 预算边界过） |
 | [engine-exposure-plan.md](engine-exposure-plan.md) | A 类引擎暴露任务跟踪表（批 1/1.5/1.6/2-6） | 活跃 |
 | [yolo-rs-absorption-plan.md](yolo-rs-absorption-plan.md) | yolo-rs 能力吸收与退役方案（阶段 0-6） | 进行中（阶段 0/1/2/3/5 完成；其余见文内） |
 | [homepix-integration-plan.md](homepix-integration-plan.md) | Argus × homepix 集成改进表（A/B/C/D 批） | 进行中（A 完成；D1 完成（含生产部署，2026-10-22）；D2 完成（2026-10-22，生产部署待 T10）；B2/B4、C1/C4/C5 未完成） |
