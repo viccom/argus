@@ -1,6 +1,6 @@
 # 实施计划：文本 reranking + 同家族模型对 env 组合
 
-> 状态：approved（待执行；TDD 先红后绿，完成定义 = 双仓 test 全绿 + clippy 0 + 双对 E2E + golden 同步）
+> 状态：approved（2026-10-22 用户批准开工；texts 上限默认 32、`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调至 64；TDD 先红后绿，完成定义 = 双仓 test 全绿 + clippy 0 + 双对 E2E + golden 同步）
 > 日期：2026-10-22
 > 基线：argus @ `45e0bc9`；rust-onnx-infer @ `49b8585`
 > 权威源：设计 [designs/2026-10-22-text-reranking-and-model-swap-design.md](../designs/2026-10-22-text-reranking-and-model-swap-design.md)（**已经两轮深度审查修订**）
@@ -72,10 +72,10 @@ T1-T8 先红后绿 + 全量双绿 + 双对 E2E（T9）+ 生产部署验收（T10
 | C14 override 可破坏 pipeline 互异 | T5 effective pipeline 测试含非空；互异仅对表值保证（override 是用户自担） |
 | C15 T3"3 断言"与 §11.2"3 组"措辞 | 设计 §11.2 已写具体 pair，T3 为每模型 3 条断言 |
 
-## 待你审批的两点（其余已可执行）
+## 已拍板（2026-10-22 用户批准）
 
-1. **texts 上限 32 + `B × max_pair_len ≤ 8192`**（原 64 已被实测推翻）。效果：全 512 token 时最多 16 条；短文本可到 32 条。若 homepix 场景需要一次排 50+ 条，告诉我，可改成"上限 64 + 预算 16384"（最坏 ~9s，仍在 shutdown 10s 内但偏紧）。
-2. **预算校验发生在懒加载之后**（tokenizer 在引擎内）。副作用：超预算请求会触发一次模型加载。若你要求"超预算请求绝不触发加载"，需 fork 增 tokenizer-only 预加载路径（工作量 +30%）。
+1. **texts 上限默认 32，`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调（1..=64）**；预算 `B × max_pair_len ≤ 8192` 不变。
+2. **预算校验位于懒加载之后**（tokenizer 在引擎内，超预算请求会触发一次模型加载）——已接受，文档注明即可（设计 §4/§6.1 已含）。
 
 ## 变更记录
 

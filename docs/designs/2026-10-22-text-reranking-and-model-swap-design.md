@@ -1,6 +1,6 @@
 # 设计：文本 reranking 能力 + 同家族模型对（embedding × reranker）env 级组合
 
-> 状态：draft（待审批）
+> 状态：approved（2026-10-22 用户批准：texts 上限默认 32、`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调至 64；预算校验位于懒加载后已接受）
 > 日期：2026-10-22
 > 基线：argus @ `45e0bc9`（测试 282 全绿 + clippy 0）；rust-onnx-infer @ `49b8585`
 > 权威源：模型事实 = [model-inventory.md](../model-inventory.md) #19/#22/#23；端点与 env 落地后回写 README
@@ -52,8 +52,8 @@
 | `PIPELINE` 串 env 覆盖，且 `ModelInfo.pipeline` 从 `&'static str` 改 `String` | 保持 `&'static str` | 运行时 env 串装不进 `&'static str`；不改类型 T5 无法实现（审查 B2） |
 | override 由 `Config` 解析，经 `EngineManager::pipeline_for(&self, cap) -> String` 统一出口 | 让自由函数 `pipeline_for` 直接读 env | 自由函数无 Config 且在测试中与 env 锁冲突（flaky）；单出口保证 `/models` 与推理响应同源 |
 | reranker 输出恒 sigmoid，响应不再单列 `sigmoid` 字段 | 加开关 / 加 `sigmoid:true` 字段 | 两族官方约定一致，YAGNI；pipeline 串已含 `\|sigmoid\|`，冗余字段无消费方 |
-| **texts 上限 32 + 计算量预算 `B × max_pair_len ≤ 8192`** | 64 / 128 / `Σ pair_len` | **实测（2026-10-22，int8，intra_op=4）**：64×512 → **17.7s/+4.7GB**；32×512 → 8.8s；fp32 64×512 → 28.3s/+5.5GB。**`Σ pair_len` 是错误指标**：31 条短文本 + 1 条 512 token（Σ 仅 884，远低于 8192）实测 **9.7s**——padding 到 L=512、B=32，真实计算量 `B×L=16384`。故预算必须用 `B × max_pair_len`（`max_pair_len` 含 query 与特殊 token）；8192 对应约 4.4s，落在 shutdown 10s 内 |
-| **token 预算校验在懒加载之后**（硬纪律 4 的窄例外） | 加载前校验 | 计数需要 tokenizer，而 tokenizer 在 `TextSessionRunner` 私有字段内、只有懒加载后才存在（fork 无任何 tokenizer 访问器，2026-10-22 核实）。**顺序**：形状/长度/条数校验（无需 tokenizer，仍先于懒加载）→ 引擎 → **预算校验** → permit → 推理。超预算请求会触发一次模型加载，代价可接受（加载一次性） |
+| **texts 上限默认 32，`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调（上限 64）** | 固定 32 / 固定 64 | **实测（2026-10-22，int8，intra_op=4）**：64×512 → **17.7s/+4.7GB**；32×512 → 8.8s；fp32 64×512 → 28.3s/+5.5GB。**`Σ pair_len` 是错误指标**：31 条短文本 + 1 条 512 token（Σ 仅 884，远低于 8192）实测 **9.7s**——padding 到 L=512、B=32，真实计算量 `B×L=16384`。故预算必须用 `B × max_pair_len`（`max_pair_len` 含 query 与特殊 token）。默认 32+8192 最坏约 4.9s（16×512）；用户显式调到 64 时自担更长的单请求占用（预算仍生效：64 条短文本 B×L=768 依旧瞬时）。**用户拍板（2026-10-22）：默认 32、env 可调、上限封顶 64** |
+| **token 预算校验在懒加载之后**（硬纪律 4 的窄例外；**用户已接受**） | 加载前校验 | 计数需要 tokenizer，而 tokenizer 在 `TextSessionRunner` 私有字段内、只有懒加载后才存在（fork 无任何 tokenizer 访问器，2026-10-22 核实）。**顺序**：形状/长度/条数校验（无需 tokenizer，仍先于懒加载）→ 引擎 → **预算校验** → permit → 推理。超预算请求会触发一次模型加载，代价可接受（加载一次性） |
 | `ARGUS_TEXT_RERANKING_MAXLEN` 独立 env（默认 512） | 复用 embedding 的 MAXLEN | 两族 reranker 支持更长上下文（jina 1026 / bge 514），且与 embedding 取值本就该独立（审查 O6） |
 | pad id 从 tokenizer 解析（不硬编码 0） | 复用 `PAD_ID = 0` | reranker 实测 `<pad>=1`；int8 下 padding 长度/pad 值会造成 logits 0.08-0.33 抖动（审查 B5） |
 | fork runner 增 `new_for_output(...)` 通用构造器 | 复用 `new`（硬编码 last_hidden_state） | reranker 无 `last_hidden_state`，复用 `new` 构造即失败（审查 B1） |
@@ -103,7 +103,7 @@ reranking.rs（新文件）: TextRerankingEngine{runner}::with_options(...)
 
 ### 6.1 新端点 `POST /rerank`（JSON）
 
-请求：`{"query":"...","texts":[".."]}`；query 1..2000 字符；texts 1..**32** 条、单条 1..2000 字符、空字符串拒绝。
+请求：`{"query":"...","texts":[".."]}`；query 1..2000 字符；texts 1..**32** 条（`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调，取值 1..=64，非法值启动失败走 `Config::validate`）、单条 1..2000 字符、空字符串拒绝。
 
 **计算量预算（替代单纯条数上限）**：`B × max_pair_len ≤ 8192`，其中 `B = texts.len()`，`max_pair_len` = 所有 (query, doc) pair 经 tokenizer 编码（含特殊 token、应用 maxlen 截断）后的**最长**长度。超出 → `bad_request`，消息给出 `B`、`max_pair_len`、当前 `B×max_pair_len` 与上限。
 
@@ -141,6 +141,7 @@ reranking.rs（新文件）: TextRerankingEngine{runner}::with_options(...)
 | `ARGUS_TEXT_EMBEDDING_MAXLEN` | 512 | 截断上限 |
 | `ARGUS_TEXT_EMBEDDING_PIPELINE` / `ARGUS_TEXT_RERANKING_PIPELINE` | 表值 | 溯源串覆盖；**换模型族必设**，否则 pipeline 说谎。与 POOLING/MAXLEN 联动（改这两项也要改串） |
 | `ARGUS_TEXT_RERANKING_POOL` | 回退 `ARGUS_ENGINE_POOL` | `CAPABILITY_KEYS` 循环自动生效（config.rs:241-257） |
+| `ARGUS_TEXT_RERANKING_MAX_TEXTS` | 32 | 单请求 texts 条数上限，可调 1..=64（用户 2026-10-22 拍板默认 32；调大自担更长单请求占用，token 预算仍生效） |
 
 **非法值处理**：`POOLING` 非 `cls`/`mean`、`MAXLEN` 非正整数 → **启动失败**。实现：`Config` 保留原始字符串，新增 `Config::validate(&self) -> Result<(), String>`，`main` 在 `from_env()` 后调用（**不在 `from_env` 内 panic**——既有测试大量直接调 `from_env`，且静默回退会让 pipeline 串与实际加工方式不符）。测试直接构造 `Config { text_embedding_pooling: Some("avg".into()), .. }` 调 `validate`，不依赖 env 锁。
 

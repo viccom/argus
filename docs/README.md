@@ -16,7 +16,7 @@
 | [designs/2026-10-21-engine-manager-dynamic-slots-design.md](designs/2026-10-21-engine-manager-dynamic-slots-design.md) | 检测族命名槽 + 热重载：`slots.toml`、可选 `model` 参数、动态溯源、静态零回归 | approved（2026-10-21）；**实施完成 2026-10-21**（计划 T0-T13 全回填，258 测试 + clippy 0 + E2E 验收 1-10 全过，已合并 main） |
 | [designs/2026-10-21-rust-onnx-infer-text-embedding-design.md](designs/2026-10-21-rust-onnx-infer-text-embedding-design.md) | fork 新增文本 Embedding 引擎（`engines/text/` 子模块，批 D1 前置）：runner/池化/确定性口径，纯增量零触碰既有引擎 | implemented（2026-10-21；fork `fdd7beb`+审查修正 `4b4615e` 已 push，计划 T0-T8 全销账） |
 | [designs/2026-10-21-argus-text-embedding-endpoint-design.md](designs/2026-10-21-argus-text-embedding-endpoint-design.md) | argus 批 D1 `POST /embed/text`：16 能力键、三件套配置、逐条循环、错误码映射、golden 同步 | implemented（2026-10-21；计划 D0-D6 全销账，测试 258→282，E2E 6 项过；生产已部署 c9ef409 bundle，2026-10-22 验收过） |
-| [designs/2026-10-22-text-reranking-and-model-swap-design.md](designs/2026-10-22-text-reranking-and-model-swap-design.md) | 文本 reranking 能力 + 同家族模型对（embedding × reranker）env 级组合：`text_reranking` 17 键、`POST /rerank`、池化/maxlen/PIPELINE env 化、jina/bge 两对预设 | draft（2026-10-22，待审批） |
+| [designs/2026-10-22-text-reranking-and-model-swap-design.md](designs/2026-10-22-text-reranking-and-model-swap-design.md) | 文本 reranking 能力 + 同家族模型对（embedding × reranker）env 级组合：`text_reranking` 17 键、`POST /rerank`、池化/maxlen/PIPELINE env 化、jina/bge 两对预设 | approved（2026-10-22，已开工） |
 
 ## 计划与进度（权威进度源）
 
