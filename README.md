@@ -90,7 +90,8 @@ cargo build --release --jobs 6
 `argus.env` 里的 `ORT_DYLIB_PATH` / `ARGUS_MODELS_DIR` 用**相对路径**（`./lib/...`、`./models`），由 `run.sh` 切到自身所在目录后解析：
 
 - 发版只需替换 bundle 目录（二进制 + `run.sh` + `argus.env`，`models`/`lib` 用软链），**不改任何字面路径**；
-- 直连 `./argus` 启动时须保证 cwd 为 bundle 目录，否则相对路径失效。
+- 直连 `./argus` 启动时须保证 cwd 为 bundle 目录，否则相对路径失效；
+- **资产目录与 bundle 解耦（2026-10-22 起）**：`models/`（591MB，含指向 fork 仓库大模型的软链）与 `lib/`（onnxruntime）的**真身放在部署根的共享资产目录**（本机 `/root/appRun/argus/{models,lib}`），bundle 内两者均为指向它的软链——**删除旧 bundle 永远不会碰到模型文件**（历史上真身曾寄居在首个 bundle 内，迁出后删 bundle 才安全）。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|

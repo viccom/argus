@@ -36,6 +36,9 @@
 | S3 | `service_info` 硬编码 `texts[1..32]`，与可调 64 不一致 | 改为"1..32 默认，ARGUS_TEXT_RERANKING_MAX_TEXTS 可调 1..=64" | health.rs service_info |
 | S4 | 默认 pipeline 串测试自证（拿表值比表值），表里写错也会绿 | 改为钉死字面量断言（text_embedding/text_reranking 各自的完整串） | `pipeline_for_should_return_table_value_by_default` |
 
+| P2 | `ARGUS_TEXT_RERANKING_MAX_TEXTS=6O4`（typo）不可解析时静默回退 32——与越界值"启动失败"不对称，用户以为 64 生效实际 32，33 条起全被拒 | MAX_TEXTS 解析失败同走 `invalid_text_maxlen` 哨兵；消息按 env 分别说明后果 | `validate_should_reject_unparseable_maxlen` 补 6O4 用例；实跑 `MAX_TEXTS=6O4` exit=1（`975c691`） |
+| P4 | README embedding MAXLEN 行漏写"≥8/不可解析 → 启动失败"（代码已如此） | 补措辞 | README env 表（`975c691`） |
+
 **未修（记录在案）**：I3 预算校验的 `pool.run` 在全局 `acquire_permit` 之外（等待不计 queue_ms、EnginePool 无超时）——属既有池语义，改动会波及全部能力，留作后续整改项；S2 状态矛盾（已在本轮文档修正一并处理）；S6 首次响应读全模型算 sha256（既有模式）；S8 深检绕过池信号量（既有同构）。
 
 ## 完成定义
