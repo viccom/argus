@@ -86,6 +86,29 @@ pub struct Config {
     /// 文本 Embedding 向量维度声明（`ARGUS_TEXT_EMBEDDING_DIM`）。加载期与
     /// `engine.dim()` 比对，不符即拒载（fail loud，防模型文件被替换成不同维度）。
     pub text_embedding_dim: Option<usize>,
+    /// 文本 Reranking ONNX 模型路径（`ARGUS_TEXT_RERANKING_MODEL`，jina-reranker
+    /// -v2-base-multilingual int8 等）。两件套（model + tokenizer）齐备才算 configured。
+    pub text_reranking_model: Option<PathBuf>,
+    /// 文本 Reranking 分词器路径（`ARGUS_TEXT_RERANKING_TOKENIZER`，tokenizer.json）。
+    /// 非 onnx 文件，不进 /models 模型清单（ocr_dict 先例），参与两件套判定。
+    pub text_reranking_tokenizer: Option<PathBuf>,
+    /// 文本 Embedding 溯源串覆盖（`ARGUS_TEXT_EMBEDDING_PIPELINE`，空串视为未设）。
+    /// 换模型族必设，否则 pipeline 说谎；与 POOLING/MAXLEN 联动（改这两项也要改串）。
+    pub text_embedding_pipeline: Option<String>,
+    /// 文本 Reranking 溯源串覆盖（`ARGUS_TEXT_RERANKING_PIPELINE`，空串视为未设）。
+    pub text_reranking_pipeline: Option<String>,
+    /// 池化方式原始字符串（`ARGUS_TEXT_EMBEDDING_POOLING`，cls|mean；保留原始串
+    /// 供 validate 校验——非 cls/mean 启动即拒，静默回退会让 pipeline 串与实际
+    /// 加工方式不符）。空串视为未设（消费方回退 mean）。
+    pub text_embedding_pooling: Option<String>,
+    /// 文本 Embedding 截断上限（`ARGUS_TEXT_EMBEDDING_MAXLEN`，默认 512 由消费方回退）。
+    pub text_embedding_maxlen: Option<usize>,
+    /// 文本 Reranking 截断上限（`ARGUS_TEXT_RERANKING_MAXLEN`，与 embedding 的
+    /// MAXLEN 独立：两族 reranker 支持更长上下文；默认 512 由消费方回退）。
+    pub text_reranking_maxlen: Option<usize>,
+    /// 文本 Reranking 单请求 texts 条数上限（`ARGUS_TEXT_RERANKING_MAX_TEXTS`，
+    /// 合法域 1..=64）。语义默认 32——Option 表示"未设"，消费方回退 32。
+    pub text_reranking_max_texts: Option<usize>,
     /// 每能力预热 dummy 输入尺寸覆盖（`ARGUS_<CAP>_WARMUP_SIZE=WxH`）。
     /// 未设置的能力沿用引擎 `input_size`。背景：OCR 预热在引擎默认的 960×960
     /// 全零 dummy 上为 20.4s/实例（det 对大块零图产出大量伪区域 + rec 批前向），
@@ -140,6 +163,14 @@ impl Default for Config {
             text_embedding_model: None,
             text_embedding_tokenizer: None,
             text_embedding_dim: None,
+            text_reranking_model: None,
+            text_reranking_tokenizer: None,
+            text_embedding_pipeline: None,
+            text_reranking_pipeline: None,
+            text_embedding_pooling: None,
+            text_embedding_maxlen: None,
+            text_reranking_maxlen: None,
+            text_reranking_max_texts: None,
             warmup_sizes: HashMap::new(),
             pools: HashMap::new(),
             slots_config: None,
@@ -237,6 +268,32 @@ impl Config {
                 cfg.text_embedding_dim = Some(n);
             }
         }
+        cfg.text_reranking_model = env_path("ARGUS_TEXT_RERANKING_MODEL");
+        cfg.text_reranking_tokenizer = env_path("ARGUS_TEXT_RERANKING_TOKENIZER");
+        // 溯源串覆盖：空串视为未设（表值生效），非空原样保留
+        cfg.text_embedding_pipeline = env::var("ARGUS_TEXT_EMBEDDING_PIPELINE")
+            .ok()
+            .filter(|s| !s.is_empty());
+        cfg.text_reranking_pipeline = env::var("ARGUS_TEXT_RERANKING_PIPELINE")
+            .ok()
+            .filter(|s| !s.is_empty());
+        // 池化保留原始串（含空串），合法性统一交给 validate
+        cfg.text_embedding_pooling = env::var("ARGUS_TEXT_EMBEDDING_POOLING").ok();
+        if let Ok(v) = env::var("ARGUS_TEXT_EMBEDDING_MAXLEN") {
+            if let Ok(n) = v.parse::<usize>() {
+                cfg.text_embedding_maxlen = Some(n);
+            }
+        }
+        if let Ok(v) = env::var("ARGUS_TEXT_RERANKING_MAXLEN") {
+            if let Ok(n) = v.parse::<usize>() {
+                cfg.text_reranking_maxlen = Some(n);
+            }
+        }
+        if let Ok(v) = env::var("ARGUS_TEXT_RERANKING_MAX_TEXTS") {
+            if let Ok(n) = v.parse::<usize>() {
+                cfg.text_reranking_max_texts = Some(n);
+            }
+        }
 
         for cap in CAPABILITY_KEYS {
             if let Some(size) = env::var(format!("ARGUS_{}_WARMUP_SIZE", cap.to_uppercase()))
@@ -270,6 +327,42 @@ impl Config {
         cfg.enabled_capabilities = whitelist;
 
         cfg
+    }
+
+    /// 校验 env 解析后的语义合法性（设计 §6.2：POOLING 非 cls/mean、MAXLEN 非正、
+    /// MAX_TEXTS 越界 → 启动失败 fail loud，静默回退会让 pipeline 串与实际加工
+    /// 方式不符）。不在 from_env 内做：既有测试大量直接调 from_env。
+    pub fn validate(&self) -> Result<(), String> {
+        // 空串视为未设（回退默认），仅非空时校验取值域
+        if let Some(pooling) = self.text_embedding_pooling.as_deref() {
+            if !pooling.is_empty() && pooling != "cls" && pooling != "mean" {
+                return Err(format!(
+                    "ARGUS_TEXT_EMBEDDING_POOLING 非法值 \"{pooling}\"（合法值: cls|mean）"
+                ));
+            }
+        }
+        if let Some(n) = self.text_embedding_maxlen {
+            if n < 1 {
+                return Err(format!(
+                    "ARGUS_TEXT_EMBEDDING_MAXLEN 必须为正整数，实际 {n}"
+                ));
+            }
+        }
+        if let Some(n) = self.text_reranking_maxlen {
+            if n < 1 {
+                return Err(format!(
+                    "ARGUS_TEXT_RERANKING_MAXLEN 必须为正整数，实际 {n}"
+                ));
+            }
+        }
+        if let Some(n) = self.text_reranking_max_texts {
+            if !(1..=64).contains(&n) {
+                return Err(format!(
+                    "ARGUS_TEXT_RERANKING_MAX_TEXTS 必须在 1..=64 内，实际 {n}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// 能力是否在白名单内；未设置白名单 = 全部允许（现有行为）。
@@ -865,6 +958,159 @@ mod tests {
         );
         unsafe {
             env::remove_var("ARGUS_ENABLED_CAPABILITIES");
+        }
+    }
+
+    // ---- 文本 Reranking 与管线覆盖（批 D 二期 T4a：Config 纯字段 + validate） ----
+
+    #[test]
+    fn validate_should_pass_default_config() {
+        // 全部新字段未设 = 现状零回归：validate 不得拒绝默认配置
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_should_accept_legal_pooling_values() {
+        for legal in ["cls", "mean"] {
+            let config = Config {
+                text_embedding_pooling: Some(legal.into()),
+                ..Config::default()
+            };
+            assert!(config.validate().is_ok(), "POOLING={legal} 应合法");
+        }
+        // 空串视为未设（消费方回退 mean），不是非法值
+        let empty = Config {
+            text_embedding_pooling: Some(String::new()),
+            ..Config::default()
+        };
+        assert!(empty.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_should_accept_positive_maxlens() {
+        let config = Config {
+            text_embedding_maxlen: Some(256),
+            text_reranking_maxlen: Some(1026),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_should_accept_max_texts_bounds() {
+        for bound in [1usize, 64] {
+            let config = Config {
+                text_reranking_max_texts: Some(bound),
+                ..Config::default()
+            };
+            assert!(config.validate().is_ok(), "MAX_TEXTS={bound} 在 1..=64 内");
+        }
+    }
+
+    #[test]
+    fn validate_should_reject_unknown_pooling() {
+        // 非法值必须报实际值与合法值：静默回退会让 pipeline 串与实际池化方式不符
+        let config = Config {
+            text_embedding_pooling: Some("avg".into()),
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("avg"), "错误消息应含实际值: {err}");
+        assert!(
+            err.contains("cls") && err.contains("mean"),
+            "错误消息应含合法值: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_should_reject_zero_maxlens() {
+        let embedding = Config {
+            text_embedding_maxlen: Some(0),
+            ..Config::default()
+        };
+        assert!(embedding.validate().is_err(), "截断上限 0 无意义");
+        let reranking = Config {
+            text_reranking_maxlen: Some(0),
+            ..Config::default()
+        };
+        assert!(reranking.validate().is_err(), "截断上限 0 无意义");
+    }
+
+    #[test]
+    fn validate_should_reject_out_of_range_max_texts() {
+        for illegal in [0usize, 65] {
+            let config = Config {
+                text_reranking_max_texts: Some(illegal),
+                ..Config::default()
+            };
+            assert!(
+                config.validate().is_err(),
+                "MAX_TEXTS={illegal} 越界（合法域 1..=64）"
+            );
+        }
+    }
+
+    #[test]
+    fn from_env_should_parse_text_reranking_and_tuning_envs() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_TEXT_RERANKING_MODEL", "/models/jina-reranker-v2/model_int8.onnx");
+            env::set_var("ARGUS_TEXT_RERANKING_TOKENIZER", "/models/jina-reranker-v2/tokenizer.json");
+            env::set_var("ARGUS_TEXT_EMBEDDING_PIPELINE", "bge-small-zh-v1.5|cls-pool-norm-v1|maxlen512");
+            env::set_var("ARGUS_TEXT_RERANKING_PIPELINE", "bge-reranker-base|sigmoid|maxlen512");
+            env::set_var("ARGUS_TEXT_EMBEDDING_POOLING", "cls");
+            env::set_var("ARGUS_TEXT_EMBEDDING_MAXLEN", "256");
+            env::set_var("ARGUS_TEXT_RERANKING_MAXLEN", "1026");
+            env::set_var("ARGUS_TEXT_RERANKING_MAX_TEXTS", "64");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.text_reranking_model.as_deref(),
+            Some(std::path::Path::new("/models/jina-reranker-v2/model_int8.onnx"))
+        );
+        assert_eq!(
+            config.text_reranking_tokenizer.as_deref(),
+            Some(std::path::Path::new("/models/jina-reranker-v2/tokenizer.json"))
+        );
+        assert_eq!(
+            config.text_embedding_pipeline.as_deref(),
+            Some("bge-small-zh-v1.5|cls-pool-norm-v1|maxlen512")
+        );
+        assert_eq!(
+            config.text_reranking_pipeline.as_deref(),
+            Some("bge-reranker-base|sigmoid|maxlen512")
+        );
+        assert_eq!(config.text_embedding_pooling.as_deref(), Some("cls"));
+        assert_eq!(config.text_embedding_maxlen, Some(256));
+        assert_eq!(config.text_reranking_maxlen, Some(1026));
+        assert_eq!(config.text_reranking_max_texts, Some(64));
+        assert!(config.validate().is_ok(), "全合法值组合应通过 validate");
+        unsafe {
+            env::remove_var("ARGUS_TEXT_RERANKING_MODEL");
+            env::remove_var("ARGUS_TEXT_RERANKING_TOKENIZER");
+            env::remove_var("ARGUS_TEXT_EMBEDDING_PIPELINE");
+            env::remove_var("ARGUS_TEXT_RERANKING_PIPELINE");
+            env::remove_var("ARGUS_TEXT_EMBEDDING_POOLING");
+            env::remove_var("ARGUS_TEXT_EMBEDDING_MAXLEN");
+            env::remove_var("ARGUS_TEXT_RERANKING_MAXLEN");
+            env::remove_var("ARGUS_TEXT_RERANKING_MAX_TEXTS");
+        }
+    }
+
+    #[test]
+    fn from_env_should_treat_empty_pipeline_override_as_unset() {
+        // 空串 = 未设（回退表值）：手写 env 清空变量是常见操作，不得当成覆盖值
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("ARGUS_TEXT_EMBEDDING_PIPELINE", "");
+            env::set_var("ARGUS_TEXT_RERANKING_PIPELINE", "");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.text_embedding_pipeline, None);
+        assert_eq!(config.text_reranking_pipeline, None);
+        unsafe {
+            env::remove_var("ARGUS_TEXT_EMBEDDING_PIPELINE");
+            env::remove_var("ARGUS_TEXT_RERANKING_PIPELINE");
         }
     }
 }

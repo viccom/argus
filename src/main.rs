@@ -18,6 +18,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = config::Config::from_env();
+    // 非法 env 值（POOLING 非 cls/mean、MAXLEN≤0、MAX_TEXTS 越界）启动即拒
+    // （fail loud，设计 §6.2）；沿用 slots 的 fail-closed 路径：Err → stderr + 非零退出。
+    config
+        .validate()
+        .map_err(|e| format!("配置校验失败: {e}"))?;
     let port = config.port;
     let auth_token = config.auth_token.clone().map(Arc::new);
 
