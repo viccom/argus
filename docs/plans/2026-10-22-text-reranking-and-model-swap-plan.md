@@ -41,6 +41,12 @@
 
 **未修（记录在案）**：I3 预算校验的 `pool.run` 在全局 `acquire_permit` 之外（等待不计 queue_ms、EnginePool 无超时）——属既有池语义，改动会波及全部能力，留作后续整改项；S2 状态矛盾（已在本轮文档修正一并处理）；S6 首次响应读全模型算 sha256（既有模式）；S8 深检绕过池信号量（既有同构）。
 
+## 升级记录（2026-10-22，终审修复后）
+
+- bundle `argus-0.1.0-d960b4a`（含审查修复 5c3b7f9/975c691）替换 ff6e7e8 上线：:7042 healthy、/rerank 0.778/0.024@19ms、/detect 过（迁移后 models 对旧能力无损）
+- **资产解耦**：models（20 项/618,650,340 B，清单+字节数前后 diff 为空）与 lib 真身从旧 bundle c4e44aa 迁至部署根共享目录 `/root/appRun/argus/{models,lib}`；旧 bundle c4e44aa/c9ef409/ff6e7e8 已删除；fork 仓库大模型真身未动
+- README「部署布局约定」已记录该约定（删 bundle 永不碰模型文件）
+
 ## 完成定义
 
 T1-T8 先红后绿 + 全量双绿 + 双对 E2E（T9）+ 生产部署验收（T10），缺一不可。过程纪律：fork 改动独立 commit + push；argus 改动 conventional commit；实测数字带时点回填本表；**状态列只在验证证据落地后回填，不预填**。
