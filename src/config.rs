@@ -109,6 +109,10 @@ pub struct Config {
     /// 文本 Reranking 单请求 texts 条数上限（`ARGUS_TEXT_RERANKING_MAX_TEXTS`，
     /// 合法域 1..=64）。语义默认 32——Option 表示"未设"，消费方回退 32。
     pub text_reranking_max_texts: Option<usize>,
+    /// 已设置但无法解析的 MAXLEN 原始串（`ARGUS_TEXT_*_MAXLEN=<原值>`）。
+    /// 存在即 validate 报错——静默回退默认值会让 pipeline 溯源串与实际加工
+    /// 方式不符（用户按 README 联动设了 maxlen 串），缓存失效键会说谎。
+    pub invalid_text_maxlen: Option<String>,
     /// 每能力预热 dummy 输入尺寸覆盖（`ARGUS_<CAP>_WARMUP_SIZE=WxH`）。
     /// 未设置的能力沿用引擎 `input_size`。背景：OCR 预热在引擎默认的 960×960
     /// 全零 dummy 上为 20.4s/实例（det 对大块零图产出大量伪区域 + rec 批前向），
@@ -171,6 +175,7 @@ impl Default for Config {
             text_embedding_maxlen: None,
             text_reranking_maxlen: None,
             text_reranking_max_texts: None,
+            invalid_text_maxlen: None,
             warmup_sizes: HashMap::new(),
             pools: HashMap::new(),
             slots_config: None,
@@ -280,13 +285,18 @@ impl Config {
         // 池化保留原始串（含空串），合法性统一交给 validate
         cfg.text_embedding_pooling = env::var("ARGUS_TEXT_EMBEDDING_POOLING").ok();
         if let Ok(v) = env::var("ARGUS_TEXT_EMBEDDING_MAXLEN") {
-            if let Ok(n) = v.parse::<usize>() {
-                cfg.text_embedding_maxlen = Some(n);
+            match v.parse::<usize>() {
+                Ok(n) => cfg.text_embedding_maxlen = Some(n),
+                // 已设置但不可解析：保留原始串到一个哨兵值让 validate 报错，
+                // 而不是静默回退 512——否则 pipeline 串（用户按 README 联动设的
+                // maxlen1024）与实际加工方式不符，缓存失效键说谎（审查 I2）。
+                Err(_) => cfg.invalid_text_maxlen = Some(format!("ARGUS_TEXT_EMBEDDING_MAXLEN={v}")),
             }
         }
         if let Ok(v) = env::var("ARGUS_TEXT_RERANKING_MAXLEN") {
-            if let Ok(n) = v.parse::<usize>() {
-                cfg.text_reranking_maxlen = Some(n);
+            match v.parse::<usize>() {
+                Ok(n) => cfg.text_reranking_maxlen = Some(n),
+                Err(_) => cfg.invalid_text_maxlen = Some(format!("ARGUS_TEXT_RERANKING_MAXLEN={v}")),
             }
         }
         if let Ok(v) = env::var("ARGUS_TEXT_RERANKING_MAX_TEXTS") {
@@ -333,6 +343,12 @@ impl Config {
     /// MAX_TEXTS 越界 → 启动失败 fail loud，静默回退会让 pipeline 串与实际加工
     /// 方式不符）。不在 from_env 内做：既有测试大量直接调 from_env。
     pub fn validate(&self) -> Result<(), String> {
+        // 已设置但不可解析的 MAXLEN：静默回退默认值会让 pipeline 串说谎（审查 I2）
+        if let Some(raw) = &self.invalid_text_maxlen {
+            return Err(format!(
+                "{raw} 无法解析为正整数（静默回退会让 pipeline 溯源串与实际加工方式不符）"
+            ));
+        }
         // 空串视为未设（回退默认），仅非空时校验取值域
         if let Some(pooling) = self.text_embedding_pooling.as_deref() {
             if !pooling.is_empty() && pooling != "cls" && pooling != "mean" {
@@ -342,16 +358,20 @@ impl Config {
             }
         }
         if let Some(n) = self.text_embedding_maxlen {
-            if n < 1 {
+            // 下界 8：tokenizers 的 truncation 先减模板特殊 token 数（单句 2 个），
+            // max_length 过小会在 usize 下溢——debug 下 panic、release 下回绕成
+            // 巨值使截断失效，静默产出无意义向量（2026-10-22 审查 I1）。
+            if n < 8 {
                 return Err(format!(
-                    "ARGUS_TEXT_EMBEDDING_MAXLEN 必须为正整数，实际 {n}"
+                    "ARGUS_TEXT_EMBEDDING_MAXLEN 必须 ≥8（特殊 token + 有效内容；实际 {n}）"
                 ));
             }
         }
         if let Some(n) = self.text_reranking_maxlen {
-            if n < 1 {
+            // pair 模板有 4 个特殊 token（<s>q</s></s>d</s>），下界同样取 8。
+            if n < 8 {
                 return Err(format!(
-                    "ARGUS_TEXT_RERANKING_MAXLEN 必须为正整数，实际 {n}"
+                    "ARGUS_TEXT_RERANKING_MAXLEN 必须 ≥8（pair 特殊 token + 有效内容；实际 {n}）"
                 ));
             }
         }
@@ -1040,6 +1060,38 @@ mod tests {
             ..Config::default()
         };
         assert!(reranking.validate().is_err(), "截断上限 0 无意义");
+    }
+
+    /// 审查 I1：tokenizers 的 truncation 会先减模板特殊 token（单句 2 / pair 4），
+    /// max_length < 该数在 release 下 usize 回绕 → 截断失效、静默产出无意义向量。
+    /// 故下界取 8（不是 1）——这条测试锁住"小到会下溢"的值必须拒。
+    #[test]
+    fn validate_should_reject_maxlens_that_underflow_truncation() {
+        for too_small in [0usize, 1, 2, 3, 4, 7] {
+            for cfg in [
+                Config { text_embedding_maxlen: Some(too_small), ..Config::default() },
+                Config { text_reranking_maxlen: Some(too_small), ..Config::default() },
+            ] {
+                let err = cfg.validate().expect_err("下溢区间的 MAXLEN 必须拒");
+                assert!(err.contains("≥8"), "消息应说明下界: {err}");
+            }
+        }
+        // 边界 8 合法
+        assert!(Config { text_embedding_maxlen: Some(8), ..Config::default() }.validate().is_ok());
+        assert!(Config { text_reranking_maxlen: Some(8), ..Config::default() }.validate().is_ok());
+    }
+
+    /// 审查 I2：`ARGUS_*_MAXLEN=abc` 若静默回退 512，用户按 README 联动设的
+    /// pipeline 串（maxlen 写了别的值）将与实际加工方式不符——缓存失效键说谎。
+    #[test]
+    fn validate_should_reject_unparseable_maxlen() {
+        let config = Config {
+            invalid_text_maxlen: Some("ARGUS_TEXT_RERANKING_MAXLEN=1O24".into()),
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("1O24"), "错误消息应含原始值: {err}");
+        assert!(err.contains("pipeline"), "错误消息应说明后果: {err}");
     }
 
     #[test]

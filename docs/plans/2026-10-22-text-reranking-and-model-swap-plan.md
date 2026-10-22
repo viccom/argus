@@ -1,6 +1,6 @@
 # 实施计划：文本 reranking + 同家族模型对 env 组合
 
-> 状态：进行中（2026-10-22；T0-T8 已销账，T9 E2E 与 T10 生产部署待做。批准口径：texts 上限默认 32、`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调至 64；TDD 先红后绿，完成定义 = 双仓 test 全绿 + clippy 0 + 双对 E2E + golden 同步）
+> 状态：已完成（2026-10-22；T0-T10 全部销账；审查修复 R1-R2 已跟进。批准口径：texts 上限默认 32、`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调至 64；完成定义 = 双仓 test 全绿 + clippy 0 + 双对 E2E + golden 同步）
 > 日期：2026-10-22
 > 基线：argus @ `45e0bc9`；rust-onnx-infer @ `49b8585`
 > 权威源：设计 [designs/2026-10-22-text-reranking-and-model-swap-design.md](../designs/2026-10-22-text-reranking-and-model-swap-design.md)（**已经两轮深度审查修订**）
@@ -22,6 +22,21 @@
 | T8 | F2 | README（/rerank 端点行 + env 表 + reranker 模型两行 + **两对预设整块**（含 POOLING/MAXLEN/PIPELINE 三 env 联动 + 有效条数上限随长度变化）+ slots 保留字 17 + 升级提示（历史 slots.toml 若用过 text_reranking 需改名））+ model-inventory #22/#23 状态 + **docs/e2e-and-models.md 补 reranker 踩坑**（`<pad>=1`、pair 模板、`logits [B,1]`、int8 padding 抖动）+ **AGENTS.md「/ui 卡片」措辞修订（文本能力豁免）** + homepix 计划表批 D 段 D2 + 本表/设计状态流转 + docs/README.md 索引 | 文档齐、索引登记 | ✅ | 2026-10-22（本提交）：README 四处（端点行/env 3 行/模型 2 行/「文本模型对预设」节）+ slots 保留字 16→17（T7 遗留项）+ inventory #22/#23"argus 已接入" + e2e 踩坑 3 行（接口三差异/int8 抖动/Σ 被 padding 绕过）+ AGENTS 三道门措辞 + homepix D2 行（D2+ 行摘除 rerank）+ design 状态 implemented + docs/README 索引两行流转 |
 | T9 | F3 | E2E 双对（临时实例真模型）：**jina 对**（现状 env + reranker int8）：固定 fixture（设计 §11.2 的 pair 与阈值：正 >0.6 / 负 <0.1 / 间隔 >0.5）+ 同请求重放逐位相等（pool=1）+ 错误矩阵 4 例 + **超预算拒绝**（32×512）耗时 + pipeline 串；**bge 对**（`POOLING=cls DIM=512` + bge reranker）：/embed/text dim=512 + /rerank 同 fixture + **pipeline 串为 bge**；**预算内最坏输入**（16×512）实测墙钟/RSS；**/models** 在与 golden 相同图像 env 下 diff 仅新增项 | 设计 §11 验收 1-5 全过 | ✅ | 2026-10-22：**jina 对 14/14**（fixture 0.7779/0.0241 间隔 0.754；同请求重放逐位相等；错误矩阵 4 例；16×428token 实测 3.5-5.2s 墙钟 inference 3461-3652ms；32×428=13696 超预算快速拒且消息含明细；溯源 model_int8.onnx#c5220cf8fe02；无 sigmoid 字段）；**bge 对 10/10**（换族全生效：POOLING=cls 模长 1.000000、dim=512、双 pipeline 串均为 bge、fixture 0.9990/0.0000）；RSS：jina 对 1489MB / bge 对 1477MB；golden 项由单测 models_envelope...exact_golden 绿覆盖 |
 | T10 | F4 | 生产 bundle 部署 jina 对（int8 reranker 软链 + 两件套 env）+ 切 systemd + 生产验收（homepix V2-V6 复跑 + /rerank 冒烟 + **shutdown 10s / acquire 30s 预算校验**）+ model-inventory 状态回填。**双实例（:7042/:7043）分别部署与冒烟**（若 7043 仍在运行） | 生产全过 | ✅ | 2026-10-22：bundle `argus-0.1.0-ff6e7e8`（reranker int8 目录软链 + 两件套 env）；systemd 切换重启；/health 版本 ff6e7e8；/models 双文本能力 configured；/rerank 冒烟 0.7779/0.0241@20ms 溯源 model_int8.onnx#c5220cf8fe02；homepix V2-V6 复跑全过；RSS 1333MB；7043 未运行（双实例条件不成立跳过）|
+
+## 深度审查与修复（2026-10-22，实施后）
+
+对 5bf8684..3734411 实施代码做独立深度审查（argus 321+3 绿 / fork 121 绿基线）。结论：**默认配置与 README 预设下无错误结果缺陷**（scores 输入序、`<pad>=1`、两输入不喂 token_type_ids、预算 `B×max_pair_len` 均经真模型复核）。已修：
+
+| ID | 问题 | 修复 | 证据 |
+|---|---|---|---|
+| I1 | MAXLEN=1..3 通过 validate，但 tokenizers truncation 先减模板特殊 token（单句 2 / pair 4）→ **release 下 usize 回绕、截断失效、静默产出无意义分数/向量** | `Config::validate` 下界改 ≥8（两个 MAXLEN 各一条消息） | `validate_should_reject_maxlens_that_underflow_truncation`（0/1/2/3/4/7 全拒，8 合法） |
+| I2 | `ARGUS_*_MAXLEN=abc/-1` 被 from_env 静默丢弃 → 回退 512，而用户按 README 联动设的 pipeline 串写的是别的 maxlen → **溯源串说谎** | 新增 `Config.invalid_text_maxlen` 哨兵，from_env 记录不可解析原值，validate 报错（含原始值） | `validate_should_reject_unparseable_maxlen` |
+| I4 | `ARGUS_TEXT_RERANKING_POOL` 继承全局池，图像部署调大全局池会连带放大 reranker session 与激活内存 | README 预设块加 `ARGUS_TEXT_RERANKING_POOL=1` + env 表写明内存口径（339MB/session、激活峰值 ~0.8GB） | README env 表 + jina 预设块 |
+| S1 | README 称 MAXLEN 超出"由 tokenizer 截断兜底"——**不成立**（tokenizer 只按 MAXLEN 截断，不按模型位置上限） | 改为"请勿超过所配模型上限（jina ~1026 / bge ~514），超限会推理报错或不可信" | README env 表 |
+| S3 | `service_info` 硬编码 `texts[1..32]`，与可调 64 不一致 | 改为"1..32 默认，ARGUS_TEXT_RERANKING_MAX_TEXTS 可调 1..=64" | health.rs service_info |
+| S4 | 默认 pipeline 串测试自证（拿表值比表值），表里写错也会绿 | 改为钉死字面量断言（text_embedding/text_reranking 各自的完整串） | `pipeline_for_should_return_table_value_by_default` |
+
+**未修（记录在案）**：I3 预算校验的 `pool.run` 在全局 `acquire_permit` 之外（等待不计 queue_ms、EnginePool 无超时）——属既有池语义，改动会波及全部能力，留作后续整改项；S2 状态矛盾（已在本轮文档修正一并处理）；S6 首次响应读全模型算 sha256（既有模式）；S8 深检绕过池信号量（既有同构）。
 
 ## 完成定义
 

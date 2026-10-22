@@ -1336,13 +1336,15 @@ mod tests {
         // 不设 override：全部能力 = 表值（既有 16 能力 + 文本两项默认串）
         let mgr = EngineManager::new(Config::default());
         assert_eq!(mgr.pipeline_for("detection"), "yolov8-det640-letterbox-v1");
+        // 文本两项钉死字面量（不拿 pipeline_table_value() 自证——否则表里写错
+        // 串测试也会绿，消费方的向量/分数失效判定键就失去保障；审查建议 4）
         assert_eq!(
             mgr.pipeline_for("text_embedding"),
-            pipeline_table_value("text_embedding")
+            "jina-embeddings-v2-base-zh|mean-pool-norm-v1|maxlen512"
         );
         assert_eq!(
             mgr.pipeline_for("text_reranking"),
-            pipeline_table_value("text_reranking")
+            "jina-reranker-v2-base-multilingual|sigmoid|maxlen512"
         );
         assert_eq!(mgr.pipeline_for("nope"), "", "未知能力空串（表值语义）");
     }
