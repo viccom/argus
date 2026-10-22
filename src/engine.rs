@@ -15,7 +15,7 @@ use rust_onnx_infer::engines::ocr::OcrPipeline;
 use rust_onnx_infer::engines::qr_detector::QrDetector;
 use rust_onnx_infer::engines::reid::ReidEngine;
 use rust_onnx_infer::engines::segmentation::SegmentationEngine;
-use rust_onnx_infer::engines::text::TextEmbeddingEngine;
+use rust_onnx_infer::engines::text::{PoolingKind, TextEmbeddingEngine, TextRerankingEngine};
 use rust_onnx_infer::imaging::{FloatMask, Rect};
 use rust_onnx_infer::model::PoseResult;
 use rust_onnx_infer::OnnxInferenceEngine;
@@ -72,8 +72,10 @@ pub const PIPELINE_TABLE: &[(&str, &str)] = &[
     ("text_reranking", "jina-reranker-v2-base-multilingual|sigmoid|maxlen512"),
 ];
 
-/// 能力键 → 管线标识。未知能力返回空串（调用方以空串为"无溯源"信号）。
-pub fn pipeline_for(capability: &str) -> &'static str {
+/// 能力键 → 管线表值。仅表值查询/测试用；生产出口（/models、推理响应溯源）
+/// 必须走 [`EngineManager::pipeline_for`]——env override 只在 manager 方法生效。
+/// 未知能力返回空串（调用方以空串为"无溯源"信号）。
+pub fn pipeline_table_value(capability: &str) -> &'static str {
     PIPELINE_TABLE
         .iter()
         .find(|(cap, _)| *cap == capability)
@@ -82,10 +84,12 @@ pub fn pipeline_for(capability: &str) -> &'static str {
 }
 
 /// 溯源信息：`model` 为"文件名#sha256 前 12 位"（多模型端点用 + 拼接）。
+/// `pipeline` 为 String：文本族可经 `ARGUS_*_PIPELINE` 覆盖（运行时 env 串，
+/// 装不进 `&'static str`——设计 §4 审查 B2）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInfo {
     pub model: String,
-    pub pipeline: &'static str,
+    pub pipeline: String,
 }
 
 /// 计算模型文件的 sha256 前 12 位（hex）。文件不存在返回 None。
@@ -163,6 +167,7 @@ pub struct EngineManager {
     depth: tokio::sync::OnceCell<Arc<EnginePool<DynDepth>>>,
     human_parsing: tokio::sync::OnceCell<Arc<EnginePool<HumanParsingEngine>>>,
     text_embedding: tokio::sync::OnceCell<Arc<EnginePool<TextEmbeddingEngine>>>,
+    text_reranking: tokio::sync::OnceCell<Arc<EnginePool<TextRerankingEngine>>>,
     /// A4 溯源缓存：能力键 → ModelInfo（model 串含文件 hash，首查后缓存）。
     model_registry: std::sync::RwLock<std::collections::HashMap<String, ModelInfo>>,
     /// 检测族动态槽（slots.toml）。静态 3 槽保持 OnceCell——registry 纯增量（设计 C1）。
@@ -192,6 +197,7 @@ impl EngineManager {
             depth: tokio::sync::OnceCell::new(),
             human_parsing: tokio::sync::OnceCell::new(),
             text_embedding: tokio::sync::OnceCell::new(),
+            text_reranking: tokio::sync::OnceCell::new(),
             model_registry: std::sync::RwLock::new(std::collections::HashMap::new()),
             slots,
         }
@@ -250,8 +256,24 @@ impl EngineManager {
 
     // ---- A4 溯源 ----
 
+    /// 能力 → 生效 pipeline 串（String）。文本两能力支持 env 覆盖
+    /// （`ARGUS_TEXT_EMBEDDING_PIPELINE` / `ARGUS_TEXT_RERANKING_PIPELINE`，
+    /// 换模型族必设，否则 pipeline 说谎——设计 §6.2）；None/空串 = 未设回退表值，
+    /// 其余能力恒表值。/models 与推理响应都经此出口，保证两处同源。
+    pub fn pipeline_for(&self, capability: &str) -> String {
+        let override_pipeline = match capability {
+            "text_embedding" => self.config.text_embedding_pipeline.as_deref(),
+            "text_reranking" => self.config.text_reranking_pipeline.as_deref(),
+            _ => None,
+        };
+        match override_pipeline.filter(|s| !s.is_empty()) {
+            Some(s) => s.to_string(),
+            None => pipeline_table_value(capability).to_string(),
+        }
+    }
+
     /// 能力溯源：`model` = 文件名#sha256 前 12 位（多模型能力用 + 拼接），
-    /// `pipeline` = 管线标识（PIPELINE_TABLE）。
+    /// `pipeline` = 生效管线标识（表值或 env 覆盖，见 [`Self::pipeline_for`]）。
     ///
     /// 首次调用时读文件计算 hash（spawn_blocking，百 MB 级 ~0.3s 一次性成本），
     /// 之后走缓存。能力未配置（或多模型能力只配一半）返回 None。
@@ -260,7 +282,7 @@ impl EngineManager {
             return Some(hit.clone());
         }
         let paths = self.config.model_paths_for(capability);
-        let pipeline = pipeline_for(capability);
+        let pipeline = self.pipeline_for(capability);
         if paths.is_empty() || pipeline.is_empty() {
             return None;
         }
@@ -326,6 +348,7 @@ impl EngineManager {
         if self.depth.initialized() { loaded.push("depth"); }
         if self.human_parsing.initialized() { loaded.push("human_parsing"); }
         if self.text_embedding.initialized() { loaded.push("text_embedding"); }
+        if self.text_reranking.initialized() { loaded.push("text_reranking"); }
         loaded
     }
 
@@ -362,6 +385,21 @@ impl EngineManager {
             .and_then(|r| r);
             results.push(EngineHealth {
                 name: "text_embedding",
+                status: if status.is_ok() { "ok" } else { "degraded" },
+                error: status.err().map(|e| e.to_string()),
+            });
+        }
+        // reranker 同理：短 pair rerank 替代 dummy 图像推理（实例 0、ok/degraded）
+        if let Some(pool) = self.text_reranking.get() {
+            let pool = Arc::clone(pool);
+            let status = tokio::task::spawn_blocking(move || {
+                pool.instances[0].rerank("ping", &["ping"]).map(|_| ())
+            })
+            .await
+            .map_err(|e| rust_onnx_infer::VisionError::inference(format!("深检任务失败: {e}")))
+            .and_then(|r| r);
+            results.push(EngineHealth {
+                name: "text_reranking",
                 status: if status.is_ok() { "ok" } else { "degraded" },
                 error: status.err().map(|e| e.to_string()),
             });
@@ -869,19 +907,22 @@ impl EngineManager {
                 let t0 = std::time::Instant::now();
                 let device = self.device;
                 let pool_size = self.config.pool_for("text_embedding");
+                // POOLING/MAXLEN env 接线（默认 = 现状：MaskedMean + 512，零回归）；
+                // 默认对应 jina 官方约定（mean pooling + normalize，
+                // 1_Pooling/config.json 的 mean_tokens=true）；bge 对需 POOLING=cls
+                let pooling = pooling_kind_for(&self.config);
+                let maxlen = maxlen_for(&self.config);
                 let mut engines = Vec::with_capacity(pool_size);
                 for _ in 0..pool_size {
                     let (m, t) = (model.clone(), tokenizer.clone());
                     let engine = tokio::task::spawn_blocking(move || {
-                        // jina 官方约定：mean pooling + normalize（1_Pooling/config.json，
-                        // mean_tokens=true）。双语 A/B 选型见 fork 计划表（2026-10-21）。
                         TextEmbeddingEngine::with_options(
                             &m,
                             &t,
                             device,
-                            rust_onnx_infer::engines::text::PoolingKind::MaskedMean,
+                            pooling,
                             true,
-                            TEXT_EMBEDDING_MAX_LENGTH,
+                            maxlen,
                             rust_onnx_infer::OnnxRuntimeConfig::defaults(),
                         )
                     })
@@ -896,8 +937,11 @@ impl EngineManager {
                         "text_embedding 模型维度不符：引擎输出 {actual_dim} 维，ARGUS_TEXT_EMBEDDING_DIM 声明 {expect_dim} 维（拒载，防模型文件被替换）"
                     )));
                 }
+                // 生效参数全量入日志（含 effective pipeline）：换族忘设 PIPELINE/
+                // POOLING 时排错依据（设计 §8 风险登记）
                 tracing::info!(
-                    "引擎 text_embedding 池({pool_size}) 加载完成: {model_display} dim={actual_dim} ({:?})",
+                    "引擎 text_embedding 池({pool_size}) 加载完成: {model_display} dim={actual_dim} pooling={pooling:?} maxlen={maxlen} pipeline={} ({:?})",
+                    self.pipeline_for("text_embedding"),
                     t0.elapsed()
                 );
                 let pool = Arc::new(EnginePool::new(engines));
@@ -907,6 +951,86 @@ impl EngineManager {
             .await
             .cloned()
     }
+
+    /// 文本 Reranking 引擎懒加载入口（T5，设计 §5 数据流 ②）。
+    ///
+    /// 与 text_embedding loader 的差异：两件套校验（model+tokenizer，无 dim——
+    /// 输出是分数不是向量）；maxlen 独立 env（`ARGUS_TEXT_RERANKING_MAXLEN`，
+    /// 两族 reranker 支持更长上下文，与 embedding 取值本就该独立）。
+    /// 池化不适用（cross-encoder 单 logit + sigmoid，fork 引擎内固定）。
+    /// 生产消费方在 T6 路由接线后就位，届时移除 allow（增量交付中间态）。
+    #[allow(dead_code)]
+    pub async fn text_reranking(&self) -> Result<Arc<EnginePool<TextRerankingEngine>>, AppError> {
+        self.text_reranking
+            .get_or_try_init(|| async {
+                self.ensure_enabled("text_reranking")?;
+                let model = self.config.text_reranking_model.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("text_reranking".into()))?;
+                let tokenizer = self.config.text_reranking_tokenizer.clone()
+                    .ok_or_else(|| AppError::ModelNotConfigured("text_reranking".into()))?;
+                let model_display = model.display().to_string();
+                let t0 = std::time::Instant::now();
+                let device = self.device;
+                let pool_size = self.config.pool_for("text_reranking");
+                let maxlen = self.config.text_reranking_maxlen.unwrap_or(512);
+                let mut engines = Vec::with_capacity(pool_size);
+                for _ in 0..pool_size {
+                    let (m, t) = (model.clone(), tokenizer.clone());
+                    let engine = tokio::task::spawn_blocking(move || {
+                        // 构造期校验 logits 输出存在且声明末维 == 1（fail loud，
+                        // 防换错模型文件——fork reranking.rs）
+                        TextRerankingEngine::with_options(
+                            &m,
+                            &t,
+                            device,
+                            maxlen,
+                            rust_onnx_infer::OnnxRuntimeConfig::defaults(),
+                        )
+                    })
+                    .await
+                    .map_err(|e| AppError::Internal(format!("引擎加载任务失败: {e}")))??;
+                    engines.push(Arc::new(engine));
+                }
+                // 各实例同构造参数，取实例 0 的 max_length 回显（截断上限生效凭据）
+                let max_length = engines.first().map(|e| e.max_length()).unwrap_or(maxlen);
+                // 生效参数入日志（含 effective pipeline）：换族忘设 PIPELINE 时排错依据
+                tracing::info!(
+                    "引擎 text_reranking 池({pool_size}) 加载完成: {model_display} maxlen={max_length} pipeline={} ({:?})",
+                    self.pipeline_for("text_reranking"),
+                    t0.elapsed()
+                );
+                let pool = Arc::new(EnginePool::new(engines));
+                pool.warmup(|e| e.rerank("预热", &["预热文档"]).map(|_| ())).await;
+                Ok(pool)
+            })
+            .await
+            .cloned()
+    }
+}
+
+// ---- 文本 Embedding 构造参数接线（env → fork 引擎参数，纯函数供单测） ----
+
+/// `ARGUS_TEXT_EMBEDDING_POOLING` → fork `PoolingKind`。
+/// 未设/空串/`mean` → MaskedMean（jina 现状，零回归）；`cls` → Cls（bge 对）。
+/// 非法值由 `Config::validate` 在启动期拦截（fail loud），此处 match 不到的
+/// 分支仅防直连构造绕过 validate——兜底 MaskedMean + warn，不 panic。
+fn pooling_kind_for(config: &Config) -> PoolingKind {
+    match config.text_embedding_pooling.as_deref().filter(|s| !s.is_empty()) {
+        Some("cls") => PoolingKind::Cls,
+        Some("mean") | None => PoolingKind::MaskedMean,
+        Some(other) => {
+            tracing::warn!(
+                "ARGUS_TEXT_EMBEDDING_POOLING 非法值 \"{other}\"，兜底 mean（启动期 validate 应已拦截）"
+            );
+            PoolingKind::MaskedMean
+        }
+    }
+}
+
+/// `ARGUS_TEXT_EMBEDDING_MAXLEN` → 截断上限；未设回退常量默认 512
+/// （常量保留作默认值来源，变更属预处理语义变化须同步改 PIPELINE_TABLE 串）。
+fn maxlen_for(config: &Config) -> usize {
+    config.text_embedding_maxlen.unwrap_or(TEXT_EMBEDDING_MAX_LENGTH)
 }
 
 /// 引擎池：同一模型的 N 个可互换实例 + 信号量准入 + round-robin 分发。
@@ -1170,6 +1294,173 @@ mod tests {
         assert!(matches!(err, AppError::CapabilityDisabled(_)), "实际: {err:?}");
     }
 
+    // ---- text_reranking loader 三态（T5，两件套 model+tokenizer） ----
+
+    #[tokio::test]
+    async fn get_text_reranking_engine_should_error_when_not_configured() {
+        let mgr = EngineManager::new(Config::default());
+        let result = mgr.text_reranking().await;
+        assert!(result.is_err());
+        assert!(matches!(result, Err(AppError::ModelNotConfigured(_))));
+    }
+
+    #[tokio::test]
+    async fn text_reranking_with_partial_config_should_error_not_configured() {
+        // 两件套（model+tokenizer）缺任一必须在触碰文件系统之前拒绝，
+        // 不得把半套配置漏成加载失败（inference_failed）
+        let config = Config {
+            text_reranking_model: Some("/nonexistent/model.onnx".into()),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.text_reranking().await.err().expect("半套配置应返回错误");
+        assert!(matches!(err, AppError::ModelNotConfigured(_)), "实际: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn text_reranking_loader_should_return_capability_disabled_when_not_whitelisted() {
+        // 两件套齐备但白名单外：CapabilityDisabled 证明拒绝先于文件系统访问
+        let config = Config {
+            text_reranking_model: Some("/nonexistent/model.onnx".into()),
+            text_reranking_tokenizer: Some("/nonexistent/tokenizer.json".into()),
+            enabled_capabilities: Some(vec!["detection".to_string()]),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let err = mgr.text_reranking().await.err().expect("白名单外应返回错误");
+        assert!(matches!(err, AppError::CapabilityDisabled(_)), "实际: {err:?}");
+    }
+
+    // ---- effective pipeline 出口（env override，/models 与推理响应同源） ----
+
+    #[test]
+    fn pipeline_for_should_return_table_value_by_default() {
+        // 不设 override：全部能力 = 表值（既有 16 能力 + 文本两项默认串）
+        let mgr = EngineManager::new(Config::default());
+        assert_eq!(mgr.pipeline_for("detection"), "yolov8-det640-letterbox-v1");
+        assert_eq!(
+            mgr.pipeline_for("text_embedding"),
+            pipeline_table_value("text_embedding")
+        );
+        assert_eq!(
+            mgr.pipeline_for("text_reranking"),
+            pipeline_table_value("text_reranking")
+        );
+        assert_eq!(mgr.pipeline_for("nope"), "", "未知能力空串（表值语义）");
+    }
+
+    #[test]
+    fn pipeline_for_should_prefer_nonempty_override() {
+        // 换模型族必设 PIPELINE 覆盖（设计 §6.2）：非空 override 优先于表值
+        let config = Config {
+            text_embedding_pipeline: Some("custom|v2".into()),
+            text_reranking_pipeline: Some("bge-reranker-base|sigmoid|maxlen512".into()),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        assert_eq!(mgr.pipeline_for("text_embedding"), "custom|v2");
+        assert_eq!(
+            mgr.pipeline_for("text_reranking"),
+            "bge-reranker-base|sigmoid|maxlen512"
+        );
+        // override 只对声明的能力生效，不串扰其他能力
+        assert_eq!(mgr.pipeline_for("detection"), "yolov8-det640-letterbox-v1");
+    }
+
+    #[test]
+    fn pipeline_for_should_treat_empty_override_as_unset() {
+        // 空串 = 未设（env 解析约定）：回退表值，不得输出空 pipeline 串
+        let config = Config {
+            text_embedding_pipeline: Some(String::new()),
+            text_reranking_pipeline: Some(String::new()),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        assert_eq!(
+            mgr.pipeline_for("text_embedding"),
+            pipeline_table_value("text_embedding")
+        );
+        assert_eq!(
+            mgr.pipeline_for("text_reranking"),
+            pipeline_table_value("text_reranking")
+        );
+    }
+
+    #[tokio::test]
+    async fn model_info_should_reflect_pipeline_override() {
+        // 溯源出口（model_info/provenance）走 manager.pipeline_for：
+        // override 须传导到 /models 与推理响应，两处同源（设计 §4）
+        let dir = std::env::temp_dir().join("argus-test-provenance-rerank");
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("fake_reranker.onnx");
+        std::fs::write(&model, b"hello").unwrap();
+        let config = Config {
+            text_reranking_model: Some(model),
+            text_reranking_pipeline: Some("bge-reranker-base|sigmoid|maxlen512".into()),
+            ..Config::default()
+        };
+        let mgr = EngineManager::new(config);
+        let mi = mgr.model_info("text_reranking").await.expect("已配置应可解析");
+        assert_eq!(mi.pipeline, "bge-reranker-base|sigmoid|maxlen512");
+    }
+
+    // ---- POOLING/MAXLEN env 接线（纯函数，loader 消费） ----
+
+    #[test]
+    fn pooling_kind_for_should_map_env_to_pooling_kind() {
+        use rust_onnx_infer::engines::text::PoolingKind;
+        // 未设/空串/mean → MaskedMean（jina 现状零回归）；cls → Cls（bge 对）
+        assert_eq!(pooling_kind_for(&Config::default()), PoolingKind::MaskedMean);
+        assert_eq!(
+            pooling_kind_for(&Config {
+                text_embedding_pooling: Some(String::new()),
+                ..Config::default()
+            }),
+            PoolingKind::MaskedMean,
+        );
+        assert_eq!(
+            pooling_kind_for(&Config {
+                text_embedding_pooling: Some("mean".into()),
+                ..Config::default()
+            }),
+            PoolingKind::MaskedMean,
+        );
+        assert_eq!(
+            pooling_kind_for(&Config {
+                text_embedding_pooling: Some("cls".into()),
+                ..Config::default()
+            }),
+            PoolingKind::Cls,
+        );
+    }
+
+    #[test]
+    fn pooling_kind_for_should_fall_back_to_mean_on_illegal_value() {
+        use rust_onnx_infer::engines::text::PoolingKind;
+        // 非法值由 Config::validate 在启动期拦截（fail loud）；此分支只防
+        // 直连构造绕过 validate 的路径——兜底 mean 而非 panic/静默选错池化
+        assert_eq!(
+            pooling_kind_for(&Config {
+                text_embedding_pooling: Some("avg".into()),
+                ..Config::default()
+            }),
+            PoolingKind::MaskedMean,
+        );
+    }
+
+    #[test]
+    fn maxlen_for_should_use_env_or_const_default() {
+        // 常量保留作默认值来源（512），env 显式值优先
+        assert_eq!(maxlen_for(&Config::default()), TEXT_EMBEDDING_MAX_LENGTH);
+        assert_eq!(
+            maxlen_for(&Config {
+                text_embedding_maxlen: Some(256),
+                ..Config::default()
+            }),
+            256,
+        );
+    }
+
     #[tokio::test]
     async fn list_loaded_should_be_empty_initially() {
         let mgr = EngineManager::new(Config::default());
@@ -1338,7 +1629,7 @@ mod tests {
         // 码表性质：每能力一条非空 pipeline，且互不相同（撞串 = 失效判定失真）
         let mut seen = std::collections::HashSet::new();
         for cap in crate::config::CAPABILITY_KEYS {
-            let p = pipeline_for(cap);
+            let p = pipeline_table_value(cap);
             assert!(!p.is_empty(), "{cap} 缺 pipeline");
             assert!(seen.insert(p), "{cap} 的 pipeline 与其他能力撞串: {p}");
         }

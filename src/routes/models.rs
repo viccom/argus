@@ -254,9 +254,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
     let mut caps = capability_models(&state.config, &loaded);
     // A4：每能力附 pipeline 标识（与推理响应的 data.pipeline 同串），
     // 消费方可预先比对——换模型后哪些结果需要失效。
+    // 走 manager 出口（env override 只在 manager.pipeline_for 生效），
+    // 与 provenance 同源；自由表值函数 pipeline_table_value 不感知 override。
     for (name, cap_value) in caps.iter_mut() {
         if let serde_json::Value::Object(map) = cap_value {
-            let pipeline = crate::engine::pipeline_for(name);
+            let pipeline = state.engines.pipeline_for(name);
             if !pipeline.is_empty() {
                 map.insert("pipeline".into(), serde_json::json!(pipeline));
             }

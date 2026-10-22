@@ -218,7 +218,7 @@ impl<T> Slot<T> {
         let computed = tokio::task::spawn_blocking(move || {
             let name = path.file_name()?.to_string_lossy().to_string();
             let hash = sha256_prefix_12(&path)?;
-            Some(ModelInfo { model: format!("{name}#{hash}"), pipeline: SLOT_PIPELINE })
+            Some(ModelInfo { model: format!("{name}#{hash}"), pipeline: SLOT_PIPELINE.to_string() })
         })
         .await
         .ok()
