@@ -130,7 +130,8 @@ pub async fn service_info(
             "POST /pose": "姿态估计（multipart: file）",
             "POST /depth": "深度估计（multipart: file）",
             "POST /human-parsing": "人体解析（multipart: file）",
-            "POST /embed/text": "文本 Embedding（JSON: texts[1..128]/mode?/normalize?，返回归一化向量+dim+pipeline）"
+            "POST /embed/text": "文本 Embedding（JSON: texts[1..128]/mode?/normalize?，返回归一化向量+dim+pipeline）",
+            "POST /rerank": "文本重排（JSON: query/texts[1..32]，返回 scores 输入序+ranking 降序，预算 B×max_pair_len≤8192）"
         }
     }))
     .into_response()
@@ -162,6 +163,7 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
         .route("/face/recognize/batch", post(crate::routes::face::face_recognize_batch))
         .route("/reid", post(crate::routes::reid::reid_embed))
         .route("/embed/text", post(crate::routes::embed::embed_text))
+        .route("/rerank", post(crate::routes::rerank::rerank_text))
         .route("/ocr", post(crate::routes::text::ocr))
         .route("/license-plate", post(crate::routes::text::license_plate))
         .route("/qr", post(crate::routes::text::qr))

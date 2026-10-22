@@ -10,6 +10,7 @@ pub mod health;
 pub mod models;
 pub mod pose_rules;
 pub mod reid;
+pub mod rerank;
 pub mod scene;
 pub mod segmentation;
 pub mod text;

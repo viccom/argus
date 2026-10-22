@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::AppError;
-use crate::routes::common::acquire_permit;
+use crate::routes::common::{acquire_permit, map_json_rejection};
 use crate::routes::health::AppState;
 
 /// 批量条数上限（防单请求压垮池：128×2000 字符已有界）。
@@ -31,16 +31,6 @@ pub struct EmbedTextRequest {
     mode: Option<String>,
     /// 仅接受 true/缺省——引擎构造期已归一化，v1 不支持关闭（显式报错优于静默忽略）。
     normalize: Option<bool>,
-}
-
-/// JSON 提取器拒绝分类：body 超限（413）与解析错误（400）必须可区分
-/// （common.rs::map_field_err 同款判别法，JSON 端点版）。
-fn map_json_rejection(e: JsonRejection) -> AppError {
-    if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
-        AppError::TooLarge(format!("请求体超过上限（请调大 ARGUS_MAX_BODY_MB）: {e}"))
-    } else {
-        AppError::BadRequest(format!("JSON 请求体无效: {e}"))
-    }
 }
 
 /// 成功响应组装（独立函数便于无模型单测 json 形状）。

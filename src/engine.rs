@@ -958,8 +958,6 @@ impl EngineManager {
     /// 输出是分数不是向量）；maxlen 独立 env（`ARGUS_TEXT_RERANKING_MAXLEN`，
     /// 两族 reranker 支持更长上下文，与 embedding 取值本就该独立）。
     /// 池化不适用（cross-encoder 单 logit + sigmoid，fork 引擎内固定）。
-    /// 生产消费方在 T6 路由接线后就位，届时移除 allow（增量交付中间态）。
-    #[allow(dead_code)]
     pub async fn text_reranking(&self) -> Result<Arc<EnginePool<TextRerankingEngine>>, AppError> {
         self.text_reranking
             .get_or_try_init(|| async {

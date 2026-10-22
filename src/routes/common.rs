@@ -26,6 +26,16 @@ pub(crate) fn map_field_err(
     }
 }
 
+/// JSON 提取器拒绝分类：body 超限（413）与解析错误（400）必须可区分
+/// （与 [`map_field_err`] 同款判别法，JSON 端点共用——/embed/text 与 /rerank）。
+pub(crate) fn map_json_rejection(e: axum::extract::rejection::JsonRejection) -> AppError {
+    if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        AppError::TooLarge(format!("请求体超过上限（请调大 ARGUS_MAX_BODY_MB）: {e}"))
+    } else {
+        AppError::BadRequest(format!("JSON 请求体无效: {e}"))
+    }
+}
+
 /// 读取单个 multipart 文本字段。
 pub(crate) async fn field_text(field: axum::extract::multipart::Field<'_>) -> Result<String, AppError> {
     let bytes = field
