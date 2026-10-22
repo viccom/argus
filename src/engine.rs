@@ -69,6 +69,7 @@ pub const PIPELINE_TABLE: &[(&str, &str)] = &[
     ("depth", "depth-anything-v2-small-v1"),
     ("human_parsing", "segformer-b2-atr18-v1"),
     ("text_embedding", "jina-embeddings-v2-base-zh|mean-pool-norm-v1|maxlen512"),
+    ("text_reranking", "jina-reranker-v2-base-multilingual|sigmoid|maxlen512"),
 ];
 
 /// 能力键 → 管线标识。未知能力返回空串（调用方以空串为"无溯源"信号）。

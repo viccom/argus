@@ -144,6 +144,13 @@
         "loaded": false,
         "models": [],
         "pipeline": "jina-embeddings-v2-base-zh|mean-pool-norm-v1|maxlen512"
+      },
+      "text_reranking": {
+        "configured": false,
+        "enabled": true,
+        "loaded": false,
+        "models": [],
+        "pipeline": "jina-reranker-v2-base-multilingual|sigmoid|maxlen512"
       }
     }
   },

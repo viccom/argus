@@ -5,11 +5,11 @@ use std::path::PathBuf;
 /// 能力键全集（规范名，与 `/models`、`EngineManager::list_loaded`、`configured_engines`
 /// 一致）。按能力覆盖的 env（预热尺寸、池大小等）一律以能力键大写为后缀，
 /// 不引入第三套命名；与模型路径 env（`FACE_DET` 等）的差异在 README 记录。
-pub const CAPABILITY_KEYS: [&str; 16] = [
+pub const CAPABILITY_KEYS: [&str; 17] = [
     "detection", "classification", "obb", "ppe", "fire_smoke",
     "face_detection", "face_recognition", "reid", "segmentation",
     "ocr", "license_plate", "qr", "pose", "depth", "human_parsing",
-    "text_embedding",
+    "text_embedding", "text_reranking",
 ];
 
 /// 服务配置。所有字段均可通过环境变量覆盖（前缀 ARGUS_）。
@@ -419,6 +419,8 @@ impl Config {
             "human_parsing" => one(&self.human_parsing_model),
             // tokenizer 非 onnx：不进清单（ocr_dict 先例），溯源只看模型文件
             "text_embedding" => one(&self.text_embedding_model),
+            // 同上：reranker 溯源只看 model onnx，tokenizer 不进清单
+            "text_reranking" => one(&self.text_reranking_model),
             _ => Vec::new(),
         }
     }
@@ -448,6 +450,10 @@ impl Config {
             && self.text_embedding_dim.is_some()
         {
             v.push("text_embedding");
+        }
+        // 两件套（model+tokenizer）缺一不可；无 dim——输出是分数不是向量
+        if self.text_reranking_model.is_some() && self.text_reranking_tokenizer.is_some() {
+            v.push("text_reranking");
         }
         v
     }

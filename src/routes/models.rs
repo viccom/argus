@@ -69,7 +69,7 @@ fn cap(
 /// `Config::configured_engines` 的命名一致）。
 fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
     let on = |name: &str| loaded.contains(&name);
-    let entries: [(&str, CapabilityModels); 16] = [
+    let entries: [(&str, CapabilityModels); 17] = [
         (
             "detection",
             cap(
@@ -221,6 +221,18 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
                 config.text_embedding_dim,
             ),
         ),
+        (
+            "text_reranking",
+            // 两件套（model+tokenizer）齐备即 configured，无 dim——输出是分数不是
+            // 向量；tokenizer 非 onnx 文件不进 models 清单（ocr_dict 先例）
+            cap(
+                &[&config.text_reranking_model],
+                config.text_reranking_model.is_some()
+                    && config.text_reranking_tokenizer.is_some(),
+                config.capability_enabled("text_reranking"), on("text_reranking"),
+                None,
+            ),
+        ),
     ];
     entries
         .into_iter()
@@ -236,7 +248,7 @@ fn capability_models(config: &Config, loaded: &[&str]) -> Map<String, Value> {
 ///
 /// 消费方（如 safe_bot）取 `capabilities.detection.models` 即该端点可用于目标
 /// 检测的模型名清单；`dynamic_slots` 是 slots.toml 动态槽的配置态/加载态
-/// （设计 C2：独立键，capabilities 16 项形状不受影响）。
+/// （设计 C2：独立键，capabilities 17 项形状不受影响）。
 pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
     let loaded = state.engines.list_loaded();
     let mut caps = capability_models(&state.config, &loaded);
@@ -250,7 +262,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Value> {
             }
         }
     }
-    // 动态槽清单（设计 C2：独立 dynamic_slots 键，capabilities 的 16 项不动——
+    // 动态槽清单（设计 C2：独立 dynamic_slots 键，capabilities 的 17 项不动——
     // safebot-go 只读 capabilities.detection.models，语义零变化）
     let mut dynamic = Map::new();
     for slot in state.engines.slots.slots_snapshot() {
@@ -312,8 +324,8 @@ mod tests {
         let caps = capability_models(&Config::default(), &[]);
         assert_eq!(
             caps.len(),
-            16,
-            "应有 16 项能力: {:?}",
+            17,
+            "应有 17 项能力: {:?}",
             caps.keys().collect::<Vec<_>>()
         );
         for (name, value) in &caps {
@@ -554,7 +566,7 @@ mod tests {
         for key in [
             "detection", "ppe", "fire_smoke", "classification", "obb", "segmentation",
             "face_detection", "face_recognition", "reid", "ocr", "license_plate", "qr",
-            "pose", "depth", "human_parsing", "text_embedding",
+            "pose", "depth", "human_parsing", "text_embedding", "text_reranking",
         ] {
             expected["data"]["capabilities"][key] = json!({
                 "configured": false, "enabled": true, "loaded": false, "models": [],
@@ -577,8 +589,8 @@ mod tests {
             })
             .collect();
         let uniq: std::collections::HashSet<&str> = pipelines.iter().copied().collect();
-        assert_eq!(pipelines.len(), 16, "应为 16 项能力");
-        assert_eq!(uniq.len(), 16, "pipeline 必须互不相同");
+        assert_eq!(pipelines.len(), 17, "应为 17 项能力");
+        assert_eq!(uniq.len(), 17, "pipeline 必须互不相同");
         expected["data"]["capabilities"].as_object_mut().unwrap().iter_mut().for_each(|(k, v)| {
             if !matches!(k.as_str(), "detection" | "ppe" | "fire_smoke") {
                 v["pipeline"] = body["data"]["capabilities"][k]["pipeline"].clone();
@@ -623,7 +635,7 @@ mod tests {
         assert_eq!(slot["loaded"], false, "未构建应 loaded=false: {body}");
         assert_eq!(slot["model_file"], "m.onnx", "只报文件名不报路径: {body}");
         assert_eq!(slot["pipeline"], "detect-slot-v1", "{body}");
-        // 16 项 capabilities 逐字节不受影响（golden 已锁形状，此处再锁数量）
-        assert_eq!(body["data"]["capabilities"].as_object().unwrap().len(), 16, "{body}");
+        // 17 项 capabilities 逐字节不受影响（golden 已锁形状，此处再锁数量）
+        assert_eq!(body["data"]["capabilities"].as_object().unwrap().len(), 17, "{body}");
     }
 }
