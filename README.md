@@ -17,6 +17,7 @@
 | `POST /face/recognize` | 人脸识别（128 维嵌入 + 余弦相似度比对；matches 含 5 关键点 landmarks 与 data.embed_dim；门控参数同 /face/detect，过滤发生在提向量之前） | SFace |
 | `POST /reid` | 行人重识别特征（multipart `file` + 可选 `boxes`=[[x1,y1,x2,y2],...] 像素框列表，缺省整图；逐框输出 512 维 L2 归一化 embedding，跨框相似度由消费方做余弦） | OSNet x1.0 |
 | `POST /embed/text` | 文本 Embedding（**JSON body** `{"texts":[".."],"mode?":"passage"\|"query","normalize?":true}`；texts 1..128 条、单条 ≤2000 字符、空字符串拒绝；逐条返回 768 维 **L2 归一化**向量——余弦退化为点积，**中英双语**（中文优先）；`mode` 两值等价实现（jina v2 无需 query 指令前缀）；`normalize=false` 暂不支持（显式报错）；同输入逐位确定，换模型/池化/maxlen 则 `pipeline` 串变（向量失效判定键）；日志与错误消息不含输入文本） | jina-embeddings-v2-base-zh |
+| `POST /rerank` | 文本重排（**JSON body** `{"query":"..","texts":[".."]}`；query ≤2000 字符；texts 1..32 条（`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调 1..=64）单条 ≤2000 字符；**计算量预算 B×max_pair_len≤8192**（含 query 与特殊 token 的最长 pair 编码长度×条数），超出 bad_request（预算校验在引擎懒加载后，超预算请求会触发一次模型加载）；返回输入序 scores + 降序 ranking（同分按 index 升序）；cross-encoder logits→sigmoid 分数，**同请求重放逐位确定，批组成变化分数会漂移**（消费方缓存需以整批为键；pool>1 时跨实例确定性未验证，生产 pool=1）；错误消息/日志不含原文 | jina-reranker-v2-base-multilingual int8 |
 | `POST /ocr` | OCR 文本检测 + 识别 | PP-OCRv5 |
 | `POST /license-plate` | 车牌检测 + 识别（mnet 关键点矫正 + LPRNet） | mnet / LPRNet |
 | `POST /qr` | 二维码检测 | WeChat QR |
@@ -52,7 +53,7 @@
 检测族新增模型从"改代码 + 发版"退化为"`slots.toml` 加一段 + 热重载"（2026-10-21 上线，吸收计划阶段 2）。示例见仓库根 [slots.example.toml](slots.example.toml)，校验规则见 `docs/designs/2026-10-21-engine-manager-dynamic-slots-design.md` §4.4。
 
 ```toml
-[slots.crack]                       # 槽名：^[a-z][a-z0-9_]{0,31}$，不得与 16 个能力键重名
+[slots.crack]                       # 槽名：^[a-z][a-z0-9_]{0,31}$，不得与 17 个能力键重名
 model = "yolov8n-crack.onnx"        # 相对 $ARGUS_MODELS_DIR；绝对路径也必须落在该目录内
 class_names = ["crack", "pothole"]  # 可选：覆盖模型 metadata 类名（自训模型常缺 metadata）
 pool_size = 1                       # 可选：缺省取 ARGUS_ENGINE_POOL，范围 1..=64
@@ -111,6 +112,9 @@ cargo build --release --jobs 6
 | `ARGUS_SLOTS_WATCH_SECS` | 3 | slots.toml 热重载轮询周期（秒）。0 = 关闭 watcher（仅启动时加载一次）。新增/修改/删除槽 ≤2 个周期生效；同路径原地改写文件不触发（指纹 = mtime 纳秒 + size），换模型文件须原子替换后 touch slots.toml |
 | `ARGUS_*_MODEL` | — | 各引擎模型路径（`DETECTION` / `PPE` / `FIRE_SMOKE` / `CLASSIFICATION` / `OBB` / `SEGMENTATION` / `FACE_DET` / `FACE_REC` / `REID` / `OCR_DET` / `OCR_REC` / `OCR_DICT` / `PLATE_DET` / `PLATE_REC` / `QR` / `POSE` / `DEPTH` / `HUMAN_PARSING` / `TEXT_EMBEDDING_MODEL`+`TEXT_EMBEDDING_TOKENIZER`+`TEXT_EMBEDDING_DIM`）。**命名差异**：模型路径 env 是历史缩写（`FACE_DET`/`FACE_REC`/`PLATE_DET`），新增的按能力 env（`<CAP>_POOL`/`<CAP>_WARMUP_SIZE` 等）一律用规范能力键大写（`FACE_DETECTION`/`FACE_RECOGNITION`/`LICENSE_PLATE`/`FIRE_SMOKE`），与 `/models` 的能力名一致，不引入第三套命名 |
 | `ARGUS_TEXT_EMBEDDING_MODEL` / `_TOKENIZER` / `_DIM` | — | 文本 Embedding 三件套（onnx 模型 / tokenizer.json / 声明维度），**齐备才算 configured**（缺任一 → `model_not_configured`）。`_DIM` 用于 `/models` 配置态回报 `dim`；引擎加载期与实际输出维度校验，不符即拒载（fail loud，防模型文件被替换）。`ARGUS_TEXT_EMBEDDING_POOL` 可独立设池（文本推理 ms 级，与检测池独立；`_WARMUP_SIZE` 不适用——预热用短 dummy 文本） |
+| `ARGUS_TEXT_RERANKING_MODEL` / `_TOKENIZER` | — | 文本重排两件套（onnx 模型 / tokenizer.json），**齐备才算 configured**（无 DIM——输出是分数不是向量）。配套：`ARGUS_TEXT_RERANKING_MAXLEN`（默认 512）pair 截断上限，两族 reranker 支持更长上下文（jina 至 1026 / bge 514，超出由 tokenizer 截断兜底）；`ARGUS_TEXT_RERANKING_MAX_TEXTS`（默认 32，1..=64）单请求 texts 条数上限。MAXLEN 非正整数 / MAX_TEXTS 越界 → **启动失败** |
+| `ARGUS_TEXT_EMBEDDING_POOLING` / `_MAXLEN` | `mean` / 512 | 池化方式（`cls`/`mean`，透传 fork `PoolingKind`，默认 = jina mean 现状）与 embedding 截断上限（与 reranking 的 MAXLEN 相互独立）。POOLING 非法值（如 `avg`）→ **启动失败**（`Config::validate`：静默回退会让 pipeline 串与实际加工方式不符） |
+| `ARGUS_TEXT_EMBEDDING_PIPELINE` / `ARGUS_TEXT_RERANKING_PIPELINE` | 表值 | 溯源串覆盖（默认表值：embedding `jina-embeddings-v2-base-zh\|mean-pool-norm-v1\|maxlen512`、reranking `jina-reranker-v2-base-multilingual\|sigmoid\|maxlen512`）。**换模型族或改 POOLING/MAXLEN 必设**——否则 `data.pipeline` 与实际加工不符，消费方向量/分数缓存失效判定失灵。空串 = 未设（用表值）。两对模型的标准预设见下节「文本模型对预设」 |
 
 ## 模型下载
 
@@ -131,9 +135,37 @@ cargo build --release --jobs 6
 | `segformer_b2_clothes.onnx` | [mattmdjaga/segformer_b2_clothes](https://huggingface.co/mattmdjaga/segformer_b2_clothes)(`onnx/model.onnx`,110MB 全量) |
 | `osnet_x1_0.onnx` | Qualcomm AI Hub 官方导出（[qualcomm/OSNet](https://huggingface.co/qualcomm/OSNet) 的 `release_assets.json` S3 直链，v0.62.2）。**zip 内为外置权重格式**（osnet.onnx + osnet.data），需 `onnx.load(load_external_data=True)` + `onnx.save` 内联为单文件；输入 `image [1,3,256,128]` 静态、输出 `embeddings [1,512]` 图内已 L2 |
 | `jina-embeddings-v2-base-zh/`（model.onnx + tokenizer.json） | [jinaai/jina-embeddings-v2-base-zh](https://huggingface.co/jinaai/jina-embeddings-v2-base-zh)（官方 `onnx/model.onnx` fp32 ~641MB + `tokenizer.json`，Apache-2.0）。**中英双语**（中文优先）JinaBERT：两 int64 输入（无 token_type_ids）+ `last_hidden_state [B,L,768]`，**mean 池化 + L2 在引擎侧做**（官方 1_Pooling 约定）。两文件同目录部署，`pipeline=jina-embeddings-v2-base-zh\|mean-pool-norm-v1\|maxlen512`。实测 p95 短句 18.4ms（ur5900，2026-10-21 双语 A/B 选型：英文判别间隔 0.43 击败 bge-small-zh 的 0.17，中文间隔 0.42 vs 0.30） |
+| `jina-reranker-v2-base-multilingual/`（model_int8.onnx + tokenizer.json） | [jinaai/jina-reranker-v2-base-multilingual](https://huggingface.co/jinaai/jina-reranker-v2-base-multilingual) 官方 `onnx/`（fp32 1.1GB / **int8 279MB** + tokenizer 17MB），Apache-2.0。多语 cross-encoder（XLM-R seq-cls）：两 int64 输入（无 token_type_ids）、pair 模板 `<s>q</s></s>d</s>`、输出 `logits [B,1]` → sigmoid 相关性分。服务 `/rerank`，`pipeline=jina-reranker-v2-base-multilingual\|sigmoid\|maxlen512`。实测 2026-10-22（指纹与三轮 A/B 见 [model-inventory](docs/model-inventory.md) #22）：判别/近重复纠偏（近重复大池 MRR 0.833→1.000）；rerank@8 92-155ms；int8 排序指标与 fp32 无差（快 1.5 倍、净省约 1GB 内存）——预设固定 int8 |
+| `bge-reranker-base/`（model_fp32.onnx + tokenizer.json） | [BAAI/bge-reranker-base](https://huggingface.co/BAAI/bge-reranker-base) 官方 `onnx/`（fp32 1.1GB + tokenizer 17MB），Apache-2.0。中文 cross-encoder，与 jina reranker 同接口形态（两输入、同 pair 模板、`logits [B,1]` sigmoid，tokenizer `<pad>=1` 非 BERT 约定的 0）。服务 `/rerank`（bge 对预设）。指纹与双模型对比见 model-inventory #23：中文家庭场景重排更稳（jina emb+jina 重排 MRR 0.906，换 bge 重排同池满分，2026-10-22 实测）；中英双语需求仍推荐 jina 对 |
 | `yolov8m-seg.onnx` | 本地导出：`YOLO('yolov8m-seg.pt').export(format='onnx', imgsz=640, opset=12)`（.pt 取自 `ultralytics/assets` release v8.3.0）。COCO 80 类实例分割，`[1,116,8400]` + proto `[1,32,160,160]`。服务 `/segmentation` |
 | `ppe_site_10cls.onnx` | [Hansung-Cho/yolov8-ppe-detection](https://huggingface.co/Hansung-Cho/yolov8-ppe-detection) `best.pt` 本地导出（同上参数）。10 类：Hardhat/Mask/NO-Hardhat/NO-Mask/NO-Safety Vest/Person/Safety Cone/Safety Vest/machinery/vehicle（含**违章反类**）。服务 `/ppe`。qualcomm gear_guard_net 因三输出自定义头弃用 |
 | `fire_smoke_2cls.onnx` | [mfranzon/fire-smoke-yolov8](https://huggingface.co/mfranzon/fire-smoke-yolov8) `fire_smoke_yolov8.pt` 本地导出（同上参数）。fire/smoke 两类。正样本实测置信度中等（0.52~0.62，nano 级），生产采用前建议再比选模型。服务 `/fire-smoke` |
+
+## 文本模型对预设（embedding × reranker）
+
+一个实例内 embedding + reranker 经 env 组成**同家族模型对**（两段独立，跨族混搭在 env 上天然成立——model-inventory #23 实测 jina emb + bge rerank 中文池同样满分；"同家族"是推荐约定而非强制）。两对模型的标准 env 块可整块复制（路径沿部署布局约定用 `$ARGUS_MODELS_DIR`；设计见 `docs/designs/2026-10-22-text-reranking-and-model-swap-design.md` §6.3）：
+
+```bash
+# jina 对（中英双语，推荐）：现状 embedding 三件套不变，只加 reranker 两件套
+ARGUS_TEXT_RERANKING_MODEL="$ARGUS_MODELS_DIR/jina-reranker-v2-base-multilingual/model_int8.onnx"
+ARGUS_TEXT_RERANKING_TOKENIZER="$ARGUS_MODELS_DIR/jina-reranker-v2-base-multilingual/tokenizer.json"
+```
+
+```bash
+# bge 对（纯中文）：整段替换 embedding 三件套 + POOLING/PIPELINE 联动
+ARGUS_TEXT_EMBEDDING_MODEL="$ARGUS_MODELS_DIR/bge-small-zh-v1.5/model.onnx"
+ARGUS_TEXT_EMBEDDING_TOKENIZER="$ARGUS_MODELS_DIR/bge-small-zh-v1.5/tokenizer.json"
+ARGUS_TEXT_EMBEDDING_DIM="512"
+ARGUS_TEXT_EMBEDDING_POOLING="cls"
+ARGUS_TEXT_EMBEDDING_PIPELINE="bge-small-zh-v1.5|cls-pool-norm-v1|maxlen512"
+ARGUS_TEXT_RERANKING_MODEL="$ARGUS_MODELS_DIR/bge-reranker-base/model_fp32.onnx"
+ARGUS_TEXT_RERANKING_TOKENIZER="$ARGUS_MODELS_DIR/bge-reranker-base/tokenizer.json"
+ARGUS_TEXT_RERANKING_PIPELINE="bge-reranker-base|sigmoid|maxlen512"
+```
+
+- **换族必设 PIPELINE**：改模型文件、`POOLING`、`MAXLEN` 任一项而不改对应 `_PIPELINE` 串 → 溯源串与实际加工不符，消费方向量/分数缓存失效判定失灵（三个 env 是联动组）。
+- **有效条数随文本长度变化**：预算 `B×max_pair_len≤8192` 下，全 512 token 的 pair 每请求最多 16 条（16×512 恰在预算内，2026-10-22 实测约 4.9s）、全 256 token 最多 32 条；短文本（~12 token）32 条瞬时（实测 168ms）。
+- **升级提示（slots 保留字）**：`text_reranking` 已是第 17 个能力键，为 slots.toml 保留字——历史 slots.toml 若用过 `text_reranking` 作槽名，升级新版后**拒绝启动**，需先改槽名。
 
 ## 依赖说明
 

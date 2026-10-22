@@ -63,7 +63,8 @@
 | ID | 任务 | 状态 | 备注 |
 |---|---|---|---|
 | D1 | `POST /embed/text`（批量文本 → 归一化向量） | ✅ | 2026-10-21 实施完成：第 16 能力键 `text_embedding`（三件套 env：MODEL/TOKENIZER/DIM，加载期 dim 校验 fail-loud）；逐条 `embed()` 循环（T8 实测快于批且严格跨批逐位确定）；空字符串/超限/mode 非法/normalize=false 全部 HTTP 前置校验→`bad_request`（fork 兜底会漏码成 inference_failed——已测试锁定）；错误码零新增。E2E 全 6 项过（:7099 真模型）：dim/模长/逐位确定/语义判别/overload retryable/鉴权一致。测试 258→282 全绿。**部署模型换型（2026-10-21 双语 A/B）**：bge-small-zh-v1.5（纯中文）→ **jina-embeddings-v2-base-zh**（中英双语，768 维 mean 池化，Apache-2.0）——英文判别间隔 0.43 vs 0.17、中文间隔 0.42 vs 0.30、p95 18.4ms（预算 30ms 内）；`pipeline=jina-embeddings-v2-base-zh\|mean-pool-norm-v1\|maxlen512`；fork 增两输入导出支持（`49b8585`）。**生产部署完成（2026-10-22）**：bundle argus-0.1.0-c9ef409（jina 模型软链入共享 models/，三件套 env DIM=768），:7042 验收验证脚本 V2-V6 全 24 项过（p95 20ms）+ detect/quality 旧能力回归过；model-inventory #19 已更新为生产在用 |
-| D2+ | 多语重排 / rerank / 跨模态 | 🚫 | 需求 §8 明确本期不做；fork 引擎结构已留正交扩展位（`engines/text/runner.rs` 复用） |
+| D2 | `POST /rerank` 文本重排端点 + 同家族模型对 env 组合 | ✅ | 2026-10-22 实施：fork `1800743` + argus T4a-T7（17 键 `text_reranking`、`B×max_pair_len≤8192` 预算、POOLING/MAXLEN/PIPELINE env、两对模型预设见 README；测试 282→322 全绿；生产部署 T10 待做） |
+| D2+ | 多语重排扩展 / 跨模态 | 🚫 | 需求 §8 原列"多语重排 / rerank / 跨模态"本期不做——其中 rerank 已作为 D2 实施（2026-10-22 二期设计批准，见上）；其余两项挂账；fork 引擎结构已留正交扩展位（`engines/text/runner.rs` 复用） |
 
 ## 5. 与既有计划的关系
 

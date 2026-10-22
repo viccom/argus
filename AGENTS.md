@@ -40,7 +40,7 @@ E2E 冒烟需运行中的实例与真实模型；模型不入库（.gitignore �
 
 1. **模型前置门**（写任何接入代码前）：magic bytes → shape dump → python onnxruntime 直跑看值域（防非标布局/归一化坐标坑）；
 2. **TDD 门**：错误路径（缺 file/坏图/未配置/未启用）+ DTO 序列化测试先红后绿，不依赖模型文件；
-3. **E2E 门**：curl 真实推理，坐标与 python 参照交叉验证 + /ui 卡片渲染。
+3. **E2E 门**：curl 真实推理，坐标与 python 参照交叉验证；图像能力含 /ui 卡片渲染，纯文本能力（embed/rerank）以 curl E2E 为准（控制台为图像工作台）。
 
 路由范式照抄 routes/classification.rs（DTO+From / parse_*_multipart / handler / oneshot 测试组）；同族检测能力加 `DetectCap` 枚举复用 run_detect，不复制实现。
 

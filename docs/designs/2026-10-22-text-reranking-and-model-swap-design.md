@@ -1,6 +1,6 @@
 # 设计：文本 reranking 能力 + 同家族模型对（embedding × reranker）env 级组合
 
-> 状态：approved（2026-10-22 用户批准：texts 上限默认 32、`ARGUS_TEXT_RERANKING_MAX_TEXTS` 可调至 64；预算校验位于懒加载后已接受）
+> 状态：implemented（2026-10-22；T0-T8 完成，T9/T10 待做）
 > 日期：2026-10-22
 > 基线：argus @ `45e0bc9`（测试 282 全绿 + clippy 0）；rust-onnx-infer @ `49b8585`
 > 权威源：模型事实 = [model-inventory.md](../model-inventory.md) #19/#22/#23；端点与 env 落地后回写 README
