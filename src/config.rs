@@ -109,9 +109,10 @@ pub struct Config {
     /// 文本 Reranking 单请求 texts 条数上限（`ARGUS_TEXT_RERANKING_MAX_TEXTS`，
     /// 合法域 1..=64）。语义默认 32——Option 表示"未设"，消费方回退 32。
     pub text_reranking_max_texts: Option<usize>,
-    /// 已设置但无法解析的 MAXLEN 原始串（`ARGUS_TEXT_*_MAXLEN=<原值>`）。
-    /// 存在即 validate 报错——静默回退默认值会让 pipeline 溯源串与实际加工
-    /// 方式不符（用户按 README 联动设了 maxlen 串），缓存失效键会说谎。
+    /// 已设置但无法解析的文本数值 env 原始串（`ARGUS_TEXT_*_MAXLEN` /
+    /// `ARGUS_TEXT_RERANKING_MAX_TEXTS` 的 `<ENV>=<原值>`）。存在即 validate
+    /// 报错——MAXLEN 静默回退会让 pipeline 溯源串与实际加工不符（缓存失效
+    /// 键说谎）；MAX_TEXTS 静默回退会让生效上限与预期不符（以为 64 实际 32）。
     pub invalid_text_maxlen: Option<String>,
     /// 每能力预热 dummy 输入尺寸覆盖（`ARGUS_<CAP>_WARMUP_SIZE=WxH`）。
     /// 未设置的能力沿用引擎 `input_size`。背景：OCR 预热在引擎默认的 960×960
@@ -300,8 +301,13 @@ impl Config {
             }
         }
         if let Ok(v) = env::var("ARGUS_TEXT_RERANKING_MAX_TEXTS") {
-            if let Ok(n) = v.parse::<usize>() {
-                cfg.text_reranking_max_texts = Some(n);
+            match v.parse::<usize>() {
+                Ok(n) => cfg.text_reranking_max_texts = Some(n),
+                // 不可解析同走哨兵：与越界（validate 拒）处理对齐——同一 env
+                // 两种非法输入两种结局是隐患（typo 静默回 32 会让用户以为 64
+                // 生效，33 条起全被拒还难排查）。终审 P2。
+                Err(_) => cfg.invalid_text_maxlen =
+                    Some(format!("ARGUS_TEXT_RERANKING_MAX_TEXTS={v}")),
             }
         }
 
@@ -346,7 +352,7 @@ impl Config {
         // 已设置但不可解析的 MAXLEN：静默回退默认值会让 pipeline 串说谎（审查 I2）
         if let Some(raw) = &self.invalid_text_maxlen {
             return Err(format!(
-                "{raw} 无法解析为正整数（静默回退会让 pipeline 溯源串与实际加工方式不符）"
+                "{raw} 无法解析为正整数（不静默回退：MAXLEN 回退会让 pipeline 溯源串与实际加工不符，MAX_TEXTS 回退会让生效上限与预期不符）"
             ));
         }
         // 空串视为未设（回退默认），仅非空时校验取值域
@@ -1092,6 +1098,13 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(err.contains("1O24"), "错误消息应含原始值: {err}");
         assert!(err.contains("pipeline"), "错误消息应说明后果: {err}");
+        // MAX_TEXTS 不可解析同拒（终审 P2：与越界 fail-loud 对齐）
+        let config = Config {
+            invalid_text_maxlen: Some("ARGUS_TEXT_RERANKING_MAX_TEXTS=6O4".into()),
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("6O4"), "错误消息应含原始值: {err}");
     }
 
     #[test]
