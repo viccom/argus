@@ -137,6 +137,17 @@ pub async fn service_info(
     .into_response()
 }
 
+/// 探活/信息类路径:其"请求完成"日志按 DEBUG 记(04-log-spec §5 噪声治理)。
+///
+/// 实测噪声占比:2026-11-10 全天 4317 行里 2482 行是探活(57.5%)。
+/// 判定只看 path(不含 query)——`/health?deep=true` 同样是探活。
+const NOISE_PATHS: [&str; 4] = ["/", "/health", "/api/health", "/status"];
+
+/// 该 path 是否属于探活/噪声路径。
+fn is_noise_path(path: &str) -> bool {
+    NOISE_PATHS.contains(&path)
+}
+
 /// 构建应用路由（提取自 main 以便测试）。
 pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::Router {
     use axum::middleware::from_fn_with_state;
@@ -181,19 +192,34 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
                 .get("x-request-id")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("-");
-            tracing::info_span!(
-                "http",
-                request_id = %request_id,
-                method = %req.method(),
-                uri = %req.uri(),
-            )
+            // 探活请求的 span 单独命名:on_response 靠 span 名判断该记 INFO 还是 DEBUG。
+            // span 保持 INFO 级别(而非 debug_span!)——RUST_LOG=info 时 debug span 会
+            // 被完全禁用,metadata() 变 None,级别判断就失效了。
+            if is_noise_path(req.uri().path()) {
+                tracing::info_span!(
+                    "http_noise",
+                    request_id = %request_id,
+                    method = %req.method(),
+                    uri = %req.uri(),
+                )
+            } else {
+                tracing::info_span!(
+                    "http",
+                    request_id = %request_id,
+                    method = %req.method(),
+                    uri = %req.uri(),
+                )
+            }
         })
-        .on_response(|resp: &axum::http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
-            tracing::info!(
-                status = resp.status().as_u16(),
-                latency_ms = latency.as_millis() as u64,
-                "请求完成"
-            );
+        .on_response(|resp: &axum::http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
+            let status = resp.status().as_u16();
+            let latency_ms = latency.as_millis() as u64;
+            // tracing 的 event! 级别必须编译期常量(callsite 是静态),故分两支。
+            if span.metadata().is_some_and(|m| m.name() == "http_noise") {
+                tracing::event!(target: "http", tracing::Level::DEBUG, status, latency_ms, "请求完成");
+            } else {
+                tracing::event!(target: "http", tracing::Level::INFO, status, latency_ms, "请求完成");
+            }
         }))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
