@@ -43,3 +43,4 @@
 | [model-download-candidates-20261021.md](model-download-candidates-20261021.md) | 互联网模型下载调研与两批实测记录（HF/魔搭渠道、A/B 数据、教训） | 参考（2026-10-21） |
 | [e2e-and-models.md](e2e-and-models.md) | E2E 冒烟与模型接入踩坑/判别法 | 参考（随新模型回填） |
 | [model-ecosystem-research.md](model-ecosystem-research.md) | 通用模型生态调研与吸纳评估 | 调研（2026-09，落地前需重新比选） |
+| [cpu-gpu-tuning-guide.md](cpu-gpu-tuning-guide.md) | **面向普通使用者**的运行参数与 CPU/GPU 选型指南：术语表、三道门并发模型、300 张图实战、本质区别、从零配置步骤、误区 FAQ、官方资料核对、线程数实测复核 | draft（2026-11-10，复审补充；待运维复核） |
