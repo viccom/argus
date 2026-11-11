@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod engine;
 mod error;
+mod logging;
 mod routes;
 mod slots;
 mod version;
@@ -9,13 +10,10 @@ mod version;
 use std::sync::Arc;
 
 use routes::health::{build_router, AppState};
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .init();
+    logging::init();
 
     let config = config::Config::from_env();
     // 非法 env 值（POOLING 非 cls/mean、MAXLEN≤0、MAX_TEXTS 越界）启动即拒

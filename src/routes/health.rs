@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::auth::auth_middleware;
 use crate::config::Config;
 use crate::engine::EngineManager;
+use tower_http::request_id::{MakeRequestId, RequestId};
 
 /// 应用共享状态，通过 axum State 提取器注入到所有 handler。
 #[derive(Clone)]
@@ -137,11 +138,48 @@ pub async fn service_info(
     .into_response()
 }
 
+/// 探活/信息类路径:其"请求完成"日志按 DEBUG 记(04-log-spec §5 噪声治理)。
+///
+/// 实测噪声占比:2026-11-10 全天 4317 行里 2482 行是探活(57.5%)。
+/// 判定只看 path(不含 query)——`/health?deep=true` 同样是探活。
+const NOISE_PATHS: [&str; 4] = ["/", "/health", "/api/health", "/status"];
+
+/// 该 path 是否属于探活/噪声路径。
+fn is_noise_path(path: &str) -> bool {
+    NOISE_PATHS.contains(&path)
+}
+
+/// 贯穿请求 ID 的生成策略：采纳调用方传入的 `x-request-id`，缺失或非法才自生成。
+///
+/// 依据 04-log-spec §4：ID 由首个收到请求的服务产生，下游**采纳透传、不自行换新**
+/// ——否则跨服务日志无法按同一 ID 关联（R2.2）。
+/// 采纳前做形态校验（8–64 位 `[A-Za-z0-9_-]`）：超长/带控制字符的值会污染日志行。
+#[derive(Clone, Copy, Default)]
+struct AdoptRequestId;
+
+impl MakeRequestId for AdoptRequestId {
+    fn make_request_id<B>(&mut self, request: &axum::http::Request<B>) -> Option<RequestId> {
+        let adopted = request
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| {
+                s.len() >= 8
+                    && s.len() <= 64
+                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+            .and_then(|s| s.parse::<axum::http::HeaderValue>().ok());
+        Some(RequestId::new(adopted.unwrap_or_else(|| {
+            uuid::Uuid::new_v4().to_string().parse().unwrap()
+        })))
+    }
+}
+
 /// 构建应用路由（提取自 main 以便测试）。
 pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::Router {
     use axum::middleware::from_fn_with_state;
     use axum::routing::{get, post};
-    use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+    use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
     use tower_http::trace::TraceLayer;
     use tower_http::cors::CorsLayer;
 
@@ -181,22 +219,37 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
                 .get("x-request-id")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("-");
-            tracing::info_span!(
-                "http",
-                request_id = %request_id,
-                method = %req.method(),
-                uri = %req.uri(),
-            )
+            // 探活请求的 span 单独命名:on_response 靠 span 名判断该记 INFO 还是 DEBUG。
+            // span 保持 INFO 级别(而非 debug_span!)——RUST_LOG=info 时 debug span 会
+            // 被完全禁用,metadata() 变 None,级别判断就失效了。
+            if is_noise_path(req.uri().path()) {
+                tracing::info_span!(
+                    "http_noise",
+                    request_id = %request_id,
+                    method = %req.method(),
+                    uri = %req.uri(),
+                )
+            } else {
+                tracing::info_span!(
+                    "http",
+                    request_id = %request_id,
+                    method = %req.method(),
+                    uri = %req.uri(),
+                )
+            }
         })
-        .on_response(|resp: &axum::http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
-            tracing::info!(
-                status = resp.status().as_u16(),
-                latency_ms = latency.as_millis() as u64,
-                "请求完成"
-            );
+        .on_response(|resp: &axum::http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
+            let status = resp.status().as_u16();
+            let latency_ms = latency.as_millis() as u64;
+            // tracing 的 event! 级别必须编译期常量(callsite 是静态),故分两支。
+            if span.metadata().is_some_and(|m| m.name() == "http_noise") {
+                tracing::event!(target: "http", tracing::Level::DEBUG, status, latency_ms, "请求完成");
+            } else {
+                tracing::event!(target: "http", tracing::Level::INFO, status, latency_ms, "请求完成");
+            }
         }))
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(SetRequestIdLayer::x_request_id(AdoptRequestId))
         .with_state(state)
 }
 
@@ -490,4 +543,64 @@ mod tests {
         let text = body_text(resp).await;
         assert!(!text.contains("dynamic_engines"), "浅检不得新增字段: {text}");
     }
+
+    /// 04 §4：采纳调用方传入的 x-request-id（不自行换新）。
+    ///
+    /// 直接对生成策略做断言（不经 router）：router 级断言只能看到响应头，
+    /// 而响应头在改造前就已经是来件值（PropagateRequestIdLayer 的既有行为），
+    /// 证明不了"span 里用的是来件 ID"——那正是本改动控制的。
+    #[test]
+    fn adopt_request_id_takes_upstream_value() {
+        const INBOUND: &str = "ec07c7c7-5d4a-41a4-a7f0-98e1df837478";
+        let req = axum::http::Request::builder()
+            .uri("/health")
+            .header("x-request-id", INBOUND)
+            .body(())
+            .unwrap();
+        let id = AdoptRequestId.make_request_id(&req).expect("应产出 request id");
+        assert_eq!(id.header_value().to_str().unwrap(), INBOUND);
+    }
+
+    /// 无来件 ID → 自生成 UUID v4（不与来件同形）。
+    #[test]
+    fn adopt_request_id_generates_when_absent() {
+        let req = axum::http::Request::builder().uri("/health").body(()).unwrap();
+        let id = AdoptRequestId.make_request_id(&req).expect("应产出 request id");
+        let v = id.header_value().to_str().unwrap().to_string();
+        assert_eq!(v.len(), 36, "应为带连字符的 UUID v4: {v}");
+        assert!(v.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+    }
+
+    /// 非法来件 ID（超长/带空白）→ 不采纳，改自生成。
+    #[test]
+    fn adopt_request_id_rejects_invalid() {
+        for bad in ["short", "bad id with spaces", &"a".repeat(65)] {
+            let req = axum::http::Request::builder()
+                .uri("/health")
+                .header("x-request-id", bad)
+                .body(())
+                .unwrap();
+            let id = AdoptRequestId.make_request_id(&req).expect("应产出 request id");
+            assert_ne!(id.header_value().to_str().unwrap(), bad, "非法来件 ID 被采纳: {bad}");
+        }
+    }
+
+    /// 路由层：响应头回写来件 ID（既有行为回归保护）。
+    #[tokio::test]
+    async fn response_carries_upstream_request_id() {
+        const INBOUND: &str = "ec07c7c7-5d4a-41a4-a7f0-98e1df837478";
+        let app = build_router(test_state(), None);
+        let req = Request::builder()
+            .uri("/health")
+            .header("x-request-id", INBOUND)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-request-id").and_then(|v| v.to_str().ok()),
+            Some(INBOUND)
+        );
+    }
+
 }
