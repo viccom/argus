@@ -1,7 +1,7 @@
 # argus 运行参数与 CPU/GPU 选型指南（面向普通使用者）
 
 > 状态：approved
-> 日期：2026-11-10（创建、复审补充、approved）
+> 日期：2026-11-10（创建、复审补充、approved、选型防错补充）
 > 基线：适用代码 commit `0cee46c`；rust-onnx-infer fork 基线 `1800743c`
 > 权威源：环境变量全集与默认值以 [README.md](../../README.md)「配置（环境变量）」节为准；本文**不复制参数表**，只讲原理、参数联动、CPU/GPU 差异与选型方法。发现与代码漂移，先回改权威源再同步本文。
 > 本文证据标签：**【实测】**= 本机/本仓命令 + 真实输出（带时点）；**【官方】**= ONNX Runtime 官方文档；**【估算】**= 由实测锚点推算，需上机压测确认；**【代码】**= 源码事实。
@@ -32,7 +32,9 @@
 | **排队 / queue_ms** | 图在"大厅"等放行的毫秒数 | §2.6 |
 | **核·秒** | 1 个 CPU 核满负荷干 1 秒的工作量；一张 detect 图约 0.33 核·秒（【实测】折算） | §4.4 |
 | **ORT / ONNX Runtime** | 真正执行模型计算的底层引擎（argus 通过 rust-onnx-infer fork 调用） | §3 |
-| **EP（Execution Provider）** | ORT 的"计算后端"：CPU EP 用 CPU 算、CUDA EP 用 NVIDIA GPU 算 | §4 |
+| **EP（Execution Provider）** | ORT 的"计算后端"：CPU EP 用 CPU 算、CUDA EP 用 NVIDIA GPU 算 | §4、§5.5 |
+| **EP 接线（开箱可用）** | 代码里真正构造某个 EP 的分支；只有接了线的 EP 才"买卡就能用"，否则只是 Cargo feature 名 | §5.5 |
+| **家用卡 / 数据中心卡** | GeForce（消费级、无 ECC）vs Tesla/A10/A100 等专业卡（ECC、vGPU、机架托管形态） | §5.5.2 |
 | **前向算子 / 卷积** | 模型内部的一步步数学运算；GPU 上由 cuDNN 库负责挑最快的卷积算法 | §4.3 |
 | **letterbox / NMS / 解码** | 送进模型前的缩放补边、结果框去重、JPEG 解码——都**在 CPU 上**做（"门外的活"） | §2.2 |
 | **显存 / VRAM / arena** | GPU 上的内存；ORT 的显存池（arena）向系统申请后**只增不减** | §4.2 |
@@ -315,7 +317,54 @@
 
 **降本杠杆**：输入 640→320/416 单卡吞吐 ×2.4–4【估算，需真实图验证精度】；服务端批处理 ×2–4【估算，代码挂账 §10.2】；竞价/按量实例先测后买。
 
-### 5.5 多卡注意：一个 argus 实例只用一张卡
+### 5.5 别选错卡：开箱可用只有 NVIDIA + 各厂商最低型号矩阵
+
+> 这一节专门防选型错误：**"卡能跑 ONNX Runtime" ≠ "argus 能用这张卡"**。
+
+**代码事实（开箱边界）**【代码，基线 `0cee46c` / fork `1800743c`】：
+- argus 的 `Cargo.toml` 只暴露 `cuda = ["rust-onnx-infer/cuda"]` 一个 GPU feature；
+- fork 的 `src/core/session_factory.rs` 里，只有 `#[cfg(feature="cuda")]` 分支真正构造 CUDA EP，设备类型选 GPU 时推入 `[CUDA, CPU]` 并带 CPU 回退；
+- `rocm` / `openvino` / `tensorrt` / `directml` / `coreml` 等只是 Cargo **feature 名**，fork 里没有对应的 EP 接线代码——未启用时 warn 后回退 CPU。
+
+结论：**当前代码状态下，"开箱即用"的 GPU 只有 NVIDIA + CUDA EP 这一条路**；其它厂商卡要先用起来，都属于"EP 移植项目"（换 ORT 构建 + 改 fork + 重测），不是采购时能直接勾的型号。
+
+#### 5.5.1 按厂商的单卡最低型号及以上（规模锚定§5.1：yolov8n@640，图片 600/s 或抽帧降级）
+
+| 厂商 / 路线 | 单卡最低型号 | 及以上 | 开箱可用？ | 判定 |
+|---|---|---|---|---|
+| **NVIDIA 数据中心卡** | **T4 16GB**（Turing sm_75） | **A10 24GB** ⭐ / L4 / L20 / L40S / A100 80G | ✅ | 唯一开箱路线。T4 仅够验证与抽帧（§5.4 吞吐表）；**600/s 持续的生产起点是 A10**（配 320 输入或批处理），不降档则 A100 级 |
+| **NVIDIA 家用/消费卡（GeForce）** | **RTX 3060 12GB**（Ampere sm_86） | RTX 3090 24G / RTX 4070Ti / **RTX 4090 24G** | ✅ 技术上 | 见 §5.5.2 专节 |
+| **AMD** | Instinct MI210 / MI250（gfx90a，若做移植） | MI300X | ❌ | fork 无 ROCm EP 接线，需自建 `onnxruntime-rocm` + MIOpen 全栈；国内云 DC 卡 SKU 少 |
+| **Intel** | Arc A770 16G / Flex 170（若做移植） | Max 1550 | ❌ | ORT 内置 OpenVINO EP **官方已 deprecated**（改推独立 Plugin EP）【官方】；且官方支持覆盖表 YOLO 只列到 v7，**yolov8 未验证** |
+| **华为昇腾** | Atlas 300I Pro / 310P、910B2（信创硬要求时） | 910B3 / 910C | ❌ | ORT 有 CANN EP 但需带 CANN 源码构建（Ascend-CI 有 910B 构建实践）；还要模型转换（.om/ATC）+ 全套重测，工期以周计 |
+
+> 采购提示：AMD / Intel / 昇腾 三行**不要混进"同规格比价表"**——它们的技术前提是"先做一个移植项目"，成本结构与 NVIDIA 完全不同。国内云实际供给也以 NVIDIA 线与昇腾线为主（阿里云 EGS / 腾讯云 GPU / 华为云 GACS；天翼云 PAK3 型为昇腾 910B2 + 鲲鹏 920）。
+> **避坑**：P4 / P100 / V100 不在推荐表——P4 无 Tensor Core、8GB、192GB/s，cuDNN 9.8 虽仍列 sm_61 但官方推荐 Pascal 走 CUDA 11.8、且驱动窗口受限（详见 §5.5.3）；V100 无 TF32 且云上性价比差。
+
+#### 5.5.2 NVIDIA 家用卡（GeForce / 工作站 RTX）专节
+
+**技术上开箱可用**：GeForce 与数据中心卡共用 CUDA EP；Ampere（RTX 30 系，sm_86）/ Ada（RTX 40 系，sm_89）都在 cuDNN 9.x 支持矩阵内，驱动 ≥570 + CUDA 12.8 + cuDNN 9.8 与仓库镜像基线一致。RTX 4090（24GB GDDR6X，~1TB/s 带宽）纸面算力甚至高于 A10。
+
+| 家用卡档位 | 显存 | 适配场景 | 与数据中心卡的差别 |
+|---|---|---|---|
+| RTX 3060 12GB（**最低**） | 12GB | 开发/功能验证、抽帧 5fps 边缘节点 | 12GB 只够开 ~3 窗口；无 ECC |
+| RTX 3090 24G / RTX 4070Ti 12G | 12–24GB | 单机压测、预研 | 3090 带宽 936GB/s；4070Ti 显存偏小 |
+| **RTX 4090 24G** | 24GB | 自建机房里的 600/s 级压测（配 320 输入/批处理） | 带宽 ~1TB/s、算力高于 A10，但 24GB 同 A10；无 ECC、无 vGPU、功耗/散热/机架形态不适合托管 |
+| 工作站卡 RTX A4000 / RTX 4000 Ada | 16 / 20GB，单槽低功耗 | 边缘服务器 | 介于两者之间，单槽 70–140W，有 ECC |
+
+**但生产/公有云不要选家用卡**，四条硬约束：
+1. **无 ECC 显存**：7×24 视觉推理，显存位翻转会导致检测框错乱且无报错，工业场景不可接受；
+2. **驱动与授权**：NVIDIA 对数据中心部署 GeForce 有驱动分支/授权限制，云服务条款也通常不允许；
+3. **运维形态**：无 vGPU/MIG、无带外管理、功耗散热按台式机设计，不适合机架托管；
+4. **公有云基本没有**：国内云 GPU 实例清一色 Tesla/数据中心卡（T4/A10/A100/L20 等），GeForce 只可能出现在自建机房或小型算力租赁平台。
+
+**判定**：家用卡适合**自建开发机 / 预研压测 / 边缘单机**（省钱、纸面算力高）；一旦是"公有云上的生产服务"，一律回到 §5.5.1 的数据中心卡表。
+
+#### 5.5.3 旧架构卡（P4 类）为什么不在推荐表
+
+P4（Pascal sm_61，8GB GDDR5，5.5 TFLOPS FP32，192GB/s，无 Tensor Core）【规格】：cuDNN 9.8.0 支持矩阵确实仍列 CC 6.1 / Pascal【官方】，但官方 Note 明确"Pascal/Maxwell 推荐配 CUDA 11.8 而非 12.8"；且 Pascal 在 CUDA 13.0 起移除离线编译支持、590 驱动起转 legacy 分支。叠加"无 Tensor Core（FP32 ONNX 吃不到 INT8/FP16 加速）+ 8GB 只够 2 窗口 + 带宽 192GB/s"，单卡吞吐【估算】50–80/s，离 600/s 差一个数量级。它唯一仍有价值的是 NVDEC 硬解（H.264/HEVC，16 路视频解码前置），但那是 argus 之外的活（§5.1：argus 只收 HTTP 图片）。**结论：可拿来做链路验证，不作生产算力选型。**
+
+### 5.6 多卡注意：一个 argus 实例只用一张卡
 
 fork 的 `DEFAULT_GPU_DEVICE_ID = 0` 固定【代码】，且官方 CUDA EP 的 `device_id` 默认也是 0【官方】——**一个实例只绑一张卡**。N 卡需求 → 起 N 个 argus 实例（不同端口/容器），上层由 safebot-go 检测池的多实例 failover 调度；"单实例管多卡"要改 fork（挂账 §10.3）。
 
@@ -357,7 +406,7 @@ ARGUS_GPU_MEM_LIMIT_MB=20000        # 进程级上限；< 物理显存，留 are
 
 > **场景 C 的算式说明**（避免两个池数混着看）：显存占用的正确算法是 **Σ(每个能力的窗口数) × ~3GB**，不是 `ENGINE_POOL` 与 `DETECTION_POOL` 相乘。上例若只启用 detection：6 × 3GB ≈ 18GB < 20GB 上限 < 24GB 物理显存，成立。**每增加一个能力就重算一次**，超了就压池或换更大显存的卡。
 
-**D. GPU 多卡**：每卡一个实例（§5.5），env 同 C、端口不同；调度交给上层。
+**D. GPU 多卡**：每卡一个实例（§5.6），env 同 C、端口不同；调度交给上层。
 
 ---
 
@@ -374,6 +423,9 @@ ARGUS_GPU_MEM_LIMIT_MB=20000        # 进程级上限；< 物理显存，留 are
 | 7 | "直接上国产卡/ARM 服务器省成本" | 当前 argus 的 GPU 路径要 NVIDIA + x86（§5.4）；鲲鹏 CPU 版部署包另有一套（已验证可跑 CPU 推理） |
 | 8 | "改 `ARGUS_ENGINE_POOL` 不用重启" | 池在启动时加载，改 env 需重启实例生效；动态槽（slots.toml）才支持热重载 |
 | 9 | "CPU 核多，把 ORT 线程数从 4 调到 16，单张图就快 4 倍" | 【实测】ORT 1.26.0 sweep：4→16 只快约 10–20%（37.5→35.2ms 到顶），8 线程后平台期、16 抖动变大；固定核预算下"少线程多窗口"总吞吐反而更高（§3.1）。线程数目前写死在 fork 里，改它属于挂账项 §10.1 |
+| 10 | "AMD / Intel / 昇腾的卡只要能跑 ONNX Runtime，argus 就能用" | ❌ 当前代码只有 CUDA EP 接线，其它 EP 只是 feature 名、GPU 设备会 warn 回退 CPU；这是移植项目不是选型（§5.5.1） |
+| 11 | "RTX 4090 比 A10 快还便宜，生产就买它" | 技术上能跑，但无 ECC、无 vGPU/带外管理、云条款与机架形态受限；家用卡只适合自建开发/预研/边缘，公有云生产用数据中心卡（§5.5.2） |
+| 12 | "P4 便宜又是推理卡，正好够用" | Pascal 无 Tensor Core、8GB 只够 2 窗口、192GB/s 带宽，单卡【估算】50–80/s，离 600/s 差一个数量级（§5.5.3） |
 
 ---
 
@@ -422,7 +474,7 @@ curl -s -H "x-api-key: <token>" -F "file=@real.jpg" http://127.0.0.1:7042/detect
 
 1. **ORT 线程数 env 化**：改 fork `runtime_config.rs` 常量 + argus 透传；注意官方提醒手动设定后不再自动绑核（§3）。**验证方法**：先在独占机做 §3.1 那样的 sweep（固定模型/图/尺寸，正反序各一遍，同时记录 p50 与抖动），再按"延迟最优"与"吞吐最优"分别定值；不要把祖传 4 直接改成核数。
 2. **服务端张量批处理**：`/detect/batch` 现为逐图 for 循环（`routes/batch.rs:4` 注明），真 batch 是 GPU 上突破单卡吞吐的下一杠杆（【估算】×2–4，需模型动态 batch 维度）。
-3. **多 GPU 绑定**（单实例多 `device_id`）：需改 fork，当前用多实例替代（§5.5）。
+3. **多 GPU 绑定**（单实例多 `device_id`）：需改 fork，当前用多实例替代（§5.6）。
 4. **TensorRT EP 验证**：fork feature 现成、未实测，静态 shape 下【估算】×2–5。
 5. **全局线程池 / 绑核**：官方提供的多 session 争抢治理手段【官方】，需评估是否引入 fork。
 
@@ -451,7 +503,10 @@ curl -s -H "x-api-key: <token>" -F "file=@real.jpg" http://127.0.0.1:7042/detect
 |---|---|
 | [ORT Thread management](https://onnxruntime.ai/docs/performance/tune-performance/threading.html) | intra 线程默认 = 物理核数、手动设定后不绑核、多 session 线程池争抢与绑核建议（§3、§4.1、§4.5） |
 | [ORT CUDA Execution Provider](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html) | ORT 1.26.x ↔ CUDA 12.8/cuDNN 9.x、`gpu_mem_limit` 默认 SIZE_MAX、arena 扩张策略、EXHAUSTIVE 卷积搜索、首次 Run 延迟高（§4.2、§4.3、§5.4） |
-| [OrtCUDAProviderOptions](https://onnxruntime.ai/docs/api/c/struct_ort_c_u_d_a_provider_options.html) | `device_id` 默认 0、arena/算法搜索默认值（§5.5） |
+| [OrtCUDAProviderOptions](https://onnxruntime.ai/docs/api/c/struct_ort_c_u_d_a_provider_options.html) | `device_id` 默认 0、arena/算法搜索默认值（§5.6） |
+| [cuDNN 9.8.0 Support Matrix](https://docs.nvidia.com/deeplearning/cudnn/backend/v9.8.0/reference/support-matrix.html) | CC 6.1 / Pascal 仍在支持列表，但官方 Note 明确"Pascal/Maxwell 推荐 CUDA 11.8"；驱动 ≥570.26（§5.5.3） |
+| [ORT OpenVINO EP](https://onnxruntime.ai/docs/execution-providers/OpenVINO-ExecutionProvider.html) | 内置 OpenVINO EP 已 deprecated、改推独立 Plugin EP；支持覆盖表 YOLO 只列到 v7（§5.5.1） |
+| [NVIDIA CUDA GPUs 计算能力表](https://developer.nvidia.com/cuda/gpus) | GeForce RTX 30 系 sm_86 / 40 系 sm_89，与数据中心卡同属 CUDA EP 支持范围（§5.5.2） |
 
 ---
 
@@ -463,3 +518,4 @@ curl -s -H "x-api-key: <token>" -F "file=@real.jpg" http://127.0.0.1:7042/detect
 | 2026-11-10 | 复审补充：新增 §0 五分钟入门与术语表；§2.4/2.5/2.6 补齐"写死"证据、池定义、300 张实战；§3 区分 ORT 官方默认与 fork 钉死 4；§4.4/4.5 补单图账单与提速姿势；§6 修 GPU 场景 C 池/显存算式矛盾；新增 §7 误区 FAQ、§8 从零配置、§11 官方资料；全篇统一【实测/官方/估算/代码】证据标签并修正错别字 |
 | 2026-11-10 | 线程数依据考证与实测复核：新增 §3.1（"4"的出处考证 + 生产同版本 ORT 1.26.0 线程 sweep 正反序复测 + 固定 16 线程预算的窗口/线程分配实验 + 实验边界声明）；同步修正 §4.5 姿势表、83ms→40ms 示例、§7 新增 FAQ 9、§10.1 验证方法、§11.1 实测附表 |
 | 2026-11-10 | 运维复核通过，状态 draft → approved；同步 docs/README.md 索引 |
+| 2026-11-10 | 防选型错误补充：新增 §5.5「开箱可用只有 NVIDIA」（代码接线依据 + 五厂商单卡最低型号矩阵 + NVIDIA 家用卡专节 + 旧架构 P4 避坑），原 §5.5 顺延为 §5.6 并全文修正引用；§0 术语表加 EP 接线/家用卡，§7 新增 FAQ 10–12，§11.2 补 4 份官方资料 |
