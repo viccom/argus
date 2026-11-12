@@ -118,6 +118,10 @@ pub struct InferenceMetrics {
     pub rejected_total: std::sync::atomic::AtomicU64,
     /// 其中因排队超时被拒的（fail-fast 模式恒为 0）。
     pub acquire_timeout_total: std::sync::atomic::AtomicU64,
+    /// 其中因 fail-fast 被拒的。独立计数而非 `rejected_total - acquire_timeout_total`
+    /// 派生：两个原子的采集快照不保证一致，相减会让累计计数器回退（违反 counter
+    /// 单调性，fanout 侧会当复位处理）。2026-11-12 深度审查修正。
+    pub fail_fast_total: std::sync::atomic::AtomicU64,
 }
 
 /// 推理许可守卫：包 OwnedSemaphorePermit，Drop 时递减 in_flight。
@@ -158,6 +162,9 @@ pub(crate) async fn acquire_permit(state: &AppState) -> Result<InferencePermit, 
             Err(_) => {
                 metrics
                     .rejected_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .fail_fast_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Err(AppError::Overload("推理并发已满(fail-fast),请稍后重试".into()))
             }
@@ -336,13 +343,14 @@ mod tests {
         )
     }
 
-    fn load(m: &InferenceMetrics) -> (usize, u64, u64, u64) {
+    fn load(m: &InferenceMetrics) -> (usize, u64, u64, u64, u64) {
         use std::sync::atomic::Ordering::Relaxed;
         (
             m.in_flight.load(Relaxed),
             m.queued_total.load(Relaxed),
             m.rejected_total.load(Relaxed),
             m.acquire_timeout_total.load(Relaxed),
+            m.fail_fast_total.load(Relaxed),
         )
     }
 
@@ -363,8 +371,8 @@ mod tests {
         let _held = acquire_permit(&state).await.unwrap();
         let err = acquire_permit(&state).await.unwrap_err();
         assert!(err.to_string().contains("fail-fast"));
-        let (in_flight, _queued, rejected, timeout) = load(&state.metrics);
-        assert_eq!((in_flight, rejected, timeout), (1, 1, 0));
+        let (in_flight, _queued, rejected, timeout, fail_fast) = load(&state.metrics);
+        assert_eq!((in_flight, rejected, timeout, fail_fast), (1, 1, 0, 1));
     }
 
     #[tokio::test]
@@ -374,7 +382,11 @@ mod tests {
         let _held = acquire_permit(&state).await.unwrap();
         let err = acquire_permit(&state).await.unwrap_err();
         assert!(err.to_string().contains("排队超时"));
-        let (_, queued, rejected, timeout) = load(&state.metrics);
-        assert_eq!((queued, rejected, timeout), (1, 1, 1), "到达无空闲 permit 计排队，超时计拒绝+超时");
+        let (_, queued, rejected, timeout, fail_fast) = load(&state.metrics);
+        assert_eq!(
+            (queued, rejected, timeout, fail_fast),
+            (1, 1, 1, 0),
+            "到达无空闲 permit 计排队,超时计拒绝+超时;fail_fast 独立计数恒 0"
+        );
     }
 }

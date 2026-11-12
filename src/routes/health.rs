@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use crate::auth::auth_middleware;
 use crate::config::Config;
 use crate::engine::EngineManager;
-use tower_http::request_id::{MakeRequestId, RequestId};
 
 /// 应用共享状态，通过 axum State 提取器注入到所有 handler。
 #[derive(Clone)]
@@ -153,30 +152,32 @@ fn is_noise_path(path: &str) -> bool {
     NOISE_PATHS.contains(&path)
 }
 
-/// 贯穿请求 ID 的生成策略：采纳调用方传入的 `x-request-id`，缺失或非法才自生成。
-///
-/// 依据 04-log-spec §4：ID 由首个收到请求的服务产生，下游**采纳透传、不自行换新**
-/// ——否则跨服务日志无法按同一 ID 关联（R2.2）。
-/// 采纳前做形态校验（8–64 位 `[A-Za-z0-9_-]`）：超长/带控制字符的值会污染日志行。
-#[derive(Clone, Copy, Default)]
-struct AdoptRequestId;
+/// `x-request-id` 来件形态校验：8–64 位 `[A-Za-z0-9_-]`（与 safebot-go 的
+/// `internal/infra/requestid` 同规则）。合法值由 `SetRequestIdLayer` 原样采纳；
+/// 非法值必须**在进入该层之前**从请求头移除——tower-http 0.6 的 `SetRequestId`
+/// 只在头缺失时才调用 `MakeRequestId`，头存在就原样采纳
+/// （`tower-http-0.6.11/src/request_id.rs:331-340`）。否则超长/带空格的值会被
+/// 原样写进日志 span 与响应头：未认证请求即可把 8KB 头放大成 16KB 日志行。
+fn is_valid_request_id(s: &str) -> bool {
+    (8..=64).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
 
-impl MakeRequestId for AdoptRequestId {
-    fn make_request_id<B>(&mut self, request: &axum::http::Request<B>) -> Option<RequestId> {
-        let adopted = request
-            .headers()
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| {
-                s.len() >= 8
-                    && s.len() <= 64
-                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            })
-            .and_then(|s| s.parse::<axum::http::HeaderValue>().ok());
-        Some(RequestId::new(adopted.unwrap_or_else(|| {
-            uuid::Uuid::new_v4().to_string().parse().unwrap()
-        })))
+/// 在 `SetRequestIdLayer` 外层剔除非法的 `x-request-id`，随后的 SetRequestId
+/// 因头缺失而生成 UUID v4；合法来件仍被原样采纳（下游贯穿语义不变）。
+async fn sanitize_request_id(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let invalid = req
+        .headers()
+        .get("x-request-id")
+        .is_some_and(|v| v.to_str().map(|s| !is_valid_request_id(s)).unwrap_or(true));
+    if invalid {
+        req.headers_mut().remove("x-request-id");
     }
+    next.run(req).await
 }
 
 /// HTTP 入站指标中间件(D3,obs-platform 05 §4.5):记 requests_total/duration_ms;
@@ -205,9 +206,9 @@ async fn http_metrics_middleware(
 
 /// 构建应用路由（提取自 main 以便测试）。
 pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::Router {
-    use axum::middleware::from_fn_with_state;
+    use axum::middleware::{from_fn, from_fn_with_state};
     use axum::routing::{get, post};
-    use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
+    use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
     use tower_http::trace::TraceLayer;
     use tower_http::cors::CorsLayer;
 
@@ -277,7 +278,10 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
             }
         }))
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(AdoptRequestId))
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        // 紧贴 SetRequestId 的外层:非法来件 ID 先剔除(头缺失 → SetRequestId 自生成);
+        // 合法来件仍由 SetRequestId 原样沿用(04 §4 贯穿语义不变)
+        .layer(from_fn(sanitize_request_id))
         // 最外层:HTTP 指标(D3)——看得到全部内层(含 AppError 扩展标记)与最终响应
         .layer(from_fn_with_state(
             state.clone(),
@@ -577,45 +581,20 @@ mod tests {
         assert!(!text.contains("dynamic_engines"), "浅检不得新增字段: {text}");
     }
 
-    /// 04 §4：采纳调用方传入的 x-request-id（不自行换新）。
+    /// 04 §4：合法来件 ID 原样采纳（router 级行为）。
     ///
-    /// 直接对生成策略做断言（不经 router）：router 级断言只能看到响应头，
-    /// 而响应头在改造前就已经是来件值（PropagateRequestIdLayer 的既有行为），
-    /// 证明不了"span 里用的是来件 ID"——那正是本改动控制的。
+    /// 注：采纳由 tower-http `SetRequestId`（头存在即沿用）完成，`AdoptRequestId`
+    /// 那条"生成策略"分支在生产路径不可达（头缺失才会被调用）——2026-11-12 深度
+    /// 审查实证；非法值的拦截由 `sanitize_request_id` 在路由层负责（见下两个用例）。
     #[test]
-    fn adopt_request_id_takes_upstream_value() {
-        const INBOUND: &str = "ec07c7c7-5d4a-41a4-a7f0-98e1df837478";
-        let req = axum::http::Request::builder()
-            .uri("/health")
-            .header("x-request-id", INBOUND)
-            .body(())
-            .unwrap();
-        let id = AdoptRequestId.make_request_id(&req).expect("应产出 request id");
-        assert_eq!(id.header_value().to_str().unwrap(), INBOUND);
-    }
-
-    /// 无来件 ID → 自生成 UUID v4（不与来件同形）。
-    #[test]
-    fn adopt_request_id_generates_when_absent() {
-        let req = axum::http::Request::builder().uri("/health").body(()).unwrap();
-        let id = AdoptRequestId.make_request_id(&req).expect("应产出 request id");
-        let v = id.header_value().to_str().unwrap().to_string();
-        assert_eq!(v.len(), 36, "应为带连字符的 UUID v4: {v}");
-        assert!(v.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
-    }
-
-    /// 非法来件 ID（超长/带空白）→ 不采纳，改自生成。
-    #[test]
-    fn adopt_request_id_rejects_invalid() {
-        for bad in ["short", "bad id with spaces", &"a".repeat(65)] {
-            let req = axum::http::Request::builder()
-                .uri("/health")
-                .header("x-request-id", bad)
-                .body(())
-                .unwrap();
-            let id = AdoptRequestId.make_request_id(&req).expect("应产出 request id");
-            assert_ne!(id.header_value().to_str().unwrap(), bad, "非法来件 ID 被采纳: {bad}");
-        }
+    fn request_id_form_should_be_validated() {
+        assert!(!is_valid_request_id("short"), "少于 8 位应拒绝");
+        assert!(!is_valid_request_id("bad id with spaces"), "空白应拒绝");
+        assert!(!is_valid_request_id(&"a".repeat(65)), "超过 64 位应拒绝");
+        assert!(!is_valid_request_id(&"é".repeat(8)), "非 ASCII 应拒绝");
+        assert!(is_valid_request_id("12345678"));
+        assert!(is_valid_request_id("ec07c7c7-5d4a-41a4-a7f0-98e1df837478"));
+        assert!(is_valid_request_id(&"a".repeat(64)));
     }
 
     /// 路由层：响应头回写来件 ID（既有行为回归保护）。
@@ -634,6 +613,53 @@ mod tests {
             resp.headers().get("x-request-id").and_then(|v| v.to_str().ok()),
             Some(INBOUND)
         );
+    }
+
+    /// 非法来件 ID 不得进入响应头/日志:router 级断言(tower-http 的 SetRequestId
+    /// 对已存在的头不调用 MakeRequestId,直测生成器证明不了这条路径)。
+    #[tokio::test]
+    async fn invalid_upstream_request_id_should_be_replaced_not_adopted() {
+        let bad_values = vec![
+            "short".to_string(),
+            "bad id with spaces".to_string(),
+            "a".repeat(65),
+            "c".repeat(8000),
+        ];
+        for bad in bad_values {
+            let app = build_router(test_state(), None);
+            let req = Request::builder()
+                .uri("/health")
+                .header("x-request-id", &bad)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let got = resp
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert_ne!(got, bad, "非法来件 ID 被采纳(len={})", bad.len());
+            assert_eq!(got.len(), 36, "应替换为 UUID v4,实际: {got}");
+        }
+    }
+
+    /// 缺失来件 ID → 自生成 UUID v4。
+    #[tokio::test]
+    async fn absent_request_id_should_generate_uuid() {
+        let app = build_router(test_state(), None);
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let got = resp
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(got.len(), 36, "应为带连字符的 UUID v4: {got}");
+        assert!(got.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{got}");
     }
 
 }

@@ -3,8 +3,9 @@
 //! 设计约束:
 //! - **开关语义(R3.5)**:`OTEL_EXPORTER_OTLP_ENDPOINT` 空 = 不初始化导出器,
 //!   全部记录方法 no-op,行为与改造前一致(与 safebot-go otelx 同语义);
-//! - **计数同源**:背压/槽指标读既有原子状态(`InferenceMetrics`、`SlotRegistry`
-//!   的 reload 计数/Slot.build_errors)只读映射,不开第二份计数;
+//! - **计数同源**:背压拒绝按 reason 在拒绝分支各自独立累加(`fail_fast_total`/
+//!   `acquire_timeout_total`,不做差分推导);槽指标只读映射既有
+//!   `SlotRegistry` reload 计数与 `Slot.build_errors`;
 //! - **fanout 红线(08 §2)**:OTLP/HTTP protobuf、Sum/Histogram 默认 cumulative、
 //!   直方图显式桶 + unit 恒定(桶布局见 05 §3,违者 fanout 整批 400);
 //! - 资源属性按 05 §2:service.name=argus、instance=argus@<port>、
@@ -80,7 +81,9 @@ impl OtelMetrics {
             .with_http()
             .with_endpoint(url)
             .with_protocol(Protocol::HttpBinary)
-            .with_timeout(Duration::from_secs(10))
+            // 导出超时 2s:本机 collector 足够;同时保证停机终期冲刷(worst case)
+            // 不突破 warden graceful_timeout=15s − axum drain 上限(默认 10s)的余量
+            .with_timeout(Duration::from_secs(2))
             .build()
         {
             Ok(e) => e,
@@ -224,21 +227,22 @@ impl OtelMetrics {
             })
             .build();
 
-        // rejected{reason}:两个拒绝分支与既有原子同点累加,这里按不变量拆分——
-        // acquire_timeout_total ⊆ rejected_total(排队超时分支两者同增;fail-fast
-        // 模式 acquire_timeout 恒 0),故 fail_fast = rejected_total - acquire_timeout_total。
+        // rejected{reason}:两个拒绝分支各自独立计数(common.rs 同点累加)。
+        // 不用 rejected_total - acquire_timeout_total 派生——两原子非同一快照,
+        // 相减会让累计计数器回退(违反单调性);2026-11-12 深度审查修正。
         let rejected = Arc::clone(&metrics);
         let _ = meter
             .u64_observable_counter("argus.backpressure.rejected_total")
             .with_callback(move |c: &dyn AsyncInstrument<u64>| {
                 use std::sync::atomic::Ordering::Relaxed;
-                let total = rejected.rejected_total.load(Relaxed);
-                let timeout = rejected.acquire_timeout_total.load(Relaxed);
                 c.observe(
-                    total.saturating_sub(timeout),
+                    rejected.fail_fast_total.load(Relaxed),
                     &[KeyValue::new("reason", "fail_fast")],
                 );
-                c.observe(timeout, &[KeyValue::new("reason", "queue_timeout")]);
+                c.observe(
+                    rejected.acquire_timeout_total.load(Relaxed),
+                    &[KeyValue::new("reason", "queue_timeout")],
+                );
             })
             .build();
 
@@ -474,14 +478,16 @@ mod tests {
     }
 
     #[test]
-    fn rejected_should_split_by_reason_from_existing_atomics() {
+    fn rejected_should_split_by_reason_from_independent_counters() {
         let config = crate::config::Config::default();
         let engines = Arc::new(crate::engine::EngineManager::new(config));
         let metrics = Arc::new(InferenceMetrics::default());
-        // 模拟既有原子:2 次 fail-fast + 1 次排队超时(超时分支两计数同增)
+        // 模拟独立计数:2 次 fail-fast + 1 次排队超时(rejected_total 是两者之和,
+        // 仅供 /health 快照;指标不读它,避免两原子相减导致的回退)
         use std::sync::atomic::Ordering::Relaxed;
         metrics.rejected_total.store(3, Relaxed);
         metrics.acquire_timeout_total.store(1, Relaxed);
+        metrics.fail_fast_total.store(2, Relaxed);
         let exporter = InMemoryMetricExporter::default();
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let otel = OtelMetrics::init_with_reader(reader, 7042, metrics, engines);
