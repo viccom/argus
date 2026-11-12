@@ -108,6 +108,12 @@ pub async fn segmentation(
     tracing::info!(endpoint = "segmentation", count, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("segmentation").await;
+    state.otel.observe_inference(
+        "segmentation",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {

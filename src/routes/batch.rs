@@ -111,6 +111,10 @@ pub async fn detect_batch(
         },
         None => state.engines.provenance("detection").await,
     };
+    // D3 指标:整批口径(逐图 permit 在 detect_one 内部,无单一排队值,不记 queue_ms)
+    state
+        .otel
+        .observe_inference_batch("detect_batch", model.as_str().unwrap_or("unknown"), elapsed);
     Ok(Json(json!({
         "status": "ok",
         "data": {

@@ -139,6 +139,12 @@ pub async fn classify(
     tracing::info!(endpoint = "classify", count, top_k, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("classification").await;
+    state.otel.observe_inference(
+        "classify",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {

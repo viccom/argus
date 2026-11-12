@@ -166,6 +166,12 @@ pub async fn pose_rules(
     );
 
     let (model, _pipeline) = state.engines.provenance("pose").await;
+    state.otel.observe_inference(
+        "pose_rules",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {

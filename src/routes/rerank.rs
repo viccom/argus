@@ -171,6 +171,12 @@ pub async fn rerank_text(
     tracing::info!(endpoint = "rerank_text", count = batch, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("text_reranking").await;
+    state.otel.observe_inference(
+        "rerank_text",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(ok_response(
         permit.queue_ms,
         model,

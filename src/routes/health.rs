@@ -21,6 +21,9 @@ pub struct AppState {
     pub inference_semaphore: Arc<tokio::sync::Semaphore>,
     /// 推理背压观测计数（B5）：in_flight/queued_total/rejected_total/acquire_timeout_total。
     pub metrics: Arc<crate::routes::common::InferenceMetrics>,
+    /// 进程内指标导出（D3）：disabled 时全部记录方法 no-op；main 在
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` 非空时替换为启用实例。
+    pub otel: crate::otel_metrics::OtelMetrics,
     pub started_at: std::time::Instant,
 }
 
@@ -36,6 +39,7 @@ impl AppState {
             engines: Arc::new(engines),
             inference_semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
             metrics: Arc::new(crate::routes::common::InferenceMetrics::default()),
+            otel: crate::otel_metrics::OtelMetrics::disabled(),
             started_at: std::time::Instant::now(),
         }
     }
@@ -175,6 +179,30 @@ impl MakeRequestId for AdoptRequestId {
     }
 }
 
+/// HTTP 入站指标中间件(D3,obs-platform 05 §4.5):记 requests_total/duration_ms;
+/// argus 错误信封恒 HTTP 200,失败经 `ErrorMetric` 响应扩展标记在此关联
+/// MatchedPath 路由模板落 `argus.inference.errors_total`。挂在最外层
+/// (SetRequestIdLayer 之后 = 全部分层的最外圈),404 未命中路由无 MatchedPath 不计。
+async fn http_metrics_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let endpoint = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|p| p.as_str().to_owned());
+    let t0 = std::time::Instant::now();
+    let resp = next.run(req).await;
+    if let Some(endpoint) = endpoint {
+        state.otel.observe_http(&endpoint, t0.elapsed().as_millis());
+        if let Some(marker) = resp.extensions().get::<crate::error::ErrorMetric>() {
+            state.otel.record_inference_error(&endpoint, marker.0);
+        }
+    }
+    resp
+}
+
 /// 构建应用路由（提取自 main 以便测试）。
 pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::Router {
     use axum::middleware::from_fn_with_state;
@@ -250,6 +278,11 @@ pub fn build_router(state: AppState, auth_state: Option<Arc<String>>) -> axum::R
         }))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(AdoptRequestId))
+        // 最外层:HTTP 指标(D3)——看得到全部内层(含 AppError 扩展标记)与最终响应
+        .layer(from_fn_with_state(
+            state.clone(),
+            http_metrics_middleware,
+        ))
         .with_state(state)
 }
 

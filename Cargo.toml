@@ -26,9 +26,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 thiserror = "2"
 sha2 = "0.10"
+# 进程内指标导出(D3,05-metrics-spec §4.5):OTLP/HTTP protobuf 直推 collector :4318,
+# fanout/collector 只收 HTTP+protobuf(05 §1);blocking client 避开嵌套 runtime 坑。
+# 隔离在 src/otel_metrics.rs 单模块,OTEL_EXPORTER_OTLP_ENDPOINT 空=全 no-op(R3.5)。
+opentelemetry = "0.33"
+opentelemetry_sdk = "0.33"
+opentelemetry-otlp = { version = "0.33", features = ["http-proto", "reqwest-blocking-client", "metrics"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# 单测读内存导出器断言指标名/属性/落桶(07-tdd §3.2)
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 
 [profile.release]
 lto = true

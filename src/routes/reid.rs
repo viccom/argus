@@ -151,6 +151,12 @@ pub async fn reid_embed(
     tracing::info!(endpoint = "reid", count, dim, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("reid").await;
+    state.otel.observe_inference(
+        "reid",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {

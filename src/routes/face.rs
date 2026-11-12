@@ -465,6 +465,12 @@ pub async fn face_detect(
     tracing::info!(endpoint = "face_detect", count, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("face_detection").await;
+    state.otel.observe_inference(
+        "face_detect",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {
@@ -501,6 +507,12 @@ pub async fn face_recognize(
 
     let embed_dim = embeddings.first().map(|e| e.len());
     let (model, pipeline) = state.engines.provenance("face_recognition").await;
+    state.otel.observe_inference(
+        "face_recognize",
+        model.as_str().unwrap_or("unknown"),
+        queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {
@@ -587,6 +599,10 @@ pub async fn face_recognize_batch(
     );
 
     let (model, pipeline) = state.engines.provenance("face_recognition").await;
+    // D3 指标:整批口径(逐图 permit 在 recognize_faces 内部,不记 queue_ms)
+    state
+        .otel
+        .observe_inference_batch("face_recognize_batch", model.as_str().unwrap_or("unknown"), elapsed);
     Ok(Json(json!({
         "status": "ok",
         "data": {

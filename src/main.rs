@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod error;
 mod logging;
+mod otel_metrics;
 mod routes;
 mod slots;
 mod version;
@@ -60,7 +61,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     engines.slots.apply_specs(slot_specs);
 
     let shutdown_timeout = std::time::Duration::from_secs(config.shutdown_timeout_secs);
-    let state = AppState::new(config.clone(), engines);
+    let mut state = AppState::new(config.clone(), engines);
+    // D3 进程内指标(05 §4.5):标准开关名,空 = 完全关闭、行为与改造前一致(R3.5)
+    if let Some(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        state.otel = otel_metrics::OtelMetrics::init(
+            &endpoint,
+            port,
+            std::sync::Arc::clone(&state.metrics),
+            std::sync::Arc::clone(&state.engines),
+        );
+    }
+    // 停机终期冲刷用的句柄(state 将被 move 进 router)
+    let otel = state.otel.clone();
     if state.config.slots_watch_secs > 0 {
         tokio::spawn(slots::watch_loop(
             std::sync::Arc::clone(&state.engines),
@@ -96,6 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    // 指标终期冲刷(periodic reader shutdown = 最终一次 collect+export),
+    // 放在 axum drain 之后、进程退出前(与 safebot-go 的 OTel flush 收尾语义一致)
+    otel.shutdown();
     tracing::info!("argus 已停止 ({})", crate::version::version_string());
 
     Ok(())

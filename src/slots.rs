@@ -179,6 +179,36 @@ fn best_canonicalize(path: &Path) -> PathBuf {
 /// 槽构建失败退避窗口（生产值）。
 pub const SLOT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
+/// 热重载观测计数(D3,obs-platform 05 §4.5):四结局累计 + last-known-good 时刻。
+/// 纯原子/锁状态,OTel 导出层(otel_metrics)只读映射,不开第二份计数。
+pub(crate) struct ReloadStats {
+    pub(crate) outcome_ok: std::sync::atomic::AtomicU64,
+    pub(crate) outcome_parse_error: std::sync::atomic::AtomicU64,
+    pub(crate) outcome_removed: std::sync::atomic::AtomicU64,
+    pub(crate) outcome_read_error: std::sync::atomic::AtomicU64,
+    /// 最近一次成功应用配置的时刻。启动即初始化(main 的 load_specs fail-closed,
+    /// 能起进程 = 初始配置有效),单调时钟。
+    pub(crate) last_ok: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl ReloadStats {
+    fn new() -> Self {
+        Self {
+            outcome_ok: std::sync::atomic::AtomicU64::new(0),
+            outcome_parse_error: std::sync::atomic::AtomicU64::new(0),
+            outcome_removed: std::sync::atomic::AtomicU64::new(0),
+            outcome_read_error: std::sync::atomic::AtomicU64::new(0),
+            last_ok: std::sync::Mutex::new(Some(std::time::Instant::now())),
+        }
+    }
+}
+
+impl Default for ReloadStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 单个动态槽：懒加载池 + 溯源缓存 + 失败退避状态。
 pub struct Slot<T> {
     pub spec: SlotSpec,
@@ -187,6 +217,8 @@ pub struct Slot<T> {
     /// 上次构建失败信息与退避截止（同一把锁，单调时钟——免疫墙钟跳变；
     /// 此前用 epoch 毫秒 AtomicU64，时钟回拨会拉长退避窗口）。
     failure: std::sync::Mutex<Option<(String, std::time::Instant)>>,
+    /// 本槽构建失败累计(D3 指标;与 failure 同点累加,OTel 只读映射)。
+    pub(crate) build_errors: std::sync::atomic::AtomicU64,
 }
 
 impl<T> Slot<T> {
@@ -196,6 +228,7 @@ impl<T> Slot<T> {
             pool: OnceCell::new(),
             model_info_cache: OnceCell::new(),
             failure: std::sync::Mutex::new(None),
+            build_errors: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -243,6 +276,8 @@ pub struct SlotRegistry<T> {
     device: DeviceType,
     build_fn: SlotBuildFn<T>,
     retry_backoff: Duration,
+    /// 热重载观测计数(D3,otel_metrics 只读映射)。
+    pub(crate) reload: ReloadStats,
 }
 
 impl<T: Send + Sync + 'static> SlotRegistry<T> {
@@ -253,6 +288,7 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
             device,
             build_fn,
             retry_backoff: SLOT_RETRY_BACKOFF,
+            reload: ReloadStats::new(),
         }
     }
 
@@ -346,6 +382,8 @@ impl<T: Send + Sync + 'static> SlotRegistry<T> {
             Ok(Err(e)) | Err(e) => {
                 *slot.failure.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some((e.to_string(), std::time::Instant::now() + self.retry_backoff));
+                slot.build_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!(
                     "动态槽 {} 构建失败（退避 {:?}）: {e}",
                     slot.spec.name, self.retry_backoff
@@ -426,20 +464,38 @@ pub fn reload_once<T: Send + Sync + 'static>(
             Ok(specs) => {
                 tracing::info!("slots.toml 重载成功: {} 个动态槽", specs.len());
                 registry.apply_specs(specs);
+                registry
+                    .reload
+                    .outcome_ok
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                *registry.reload.last_ok.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(std::time::Instant::now());
                 *last_fp = fp;
             }
             Err(e) => {
                 tracing::error!("slots.toml 重载失败(保留旧配置): {e}");
+                registry
+                    .reload
+                    .outcome_parse_error
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 *last_fp = fp;
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!("slots.toml 已移除: 清空动态槽(静态能力不受影响)");
             registry.apply_specs(Vec::new());
+            registry
+                .reload
+                .outcome_removed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *last_fp = None;
         },
         Err(e) => {
             tracing::error!("slots.toml 读取失败(保留旧配置): {e}");
+            registry
+                .reload
+                .outcome_read_error
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *last_fp = fp;
         }
     }

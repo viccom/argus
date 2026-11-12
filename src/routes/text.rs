@@ -130,6 +130,12 @@ pub async fn ocr(
     tracing::info!(endpoint = "ocr", count, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("ocr").await;
+    state.otel.observe_inference(
+        "ocr",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {
@@ -174,6 +180,12 @@ pub async fn license_plate(
     tracing::info!(endpoint = "license_plate", count, sliced, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("license_plate").await;
+    state.otel.observe_inference(
+        "license_plate",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {
@@ -208,6 +220,12 @@ pub async fn qr(
     tracing::info!(endpoint = "qr", count, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("qr").await;
+    state.otel.observe_inference(
+        "qr",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {

@@ -252,6 +252,8 @@ pub async fn quality(
     tracing::info!(endpoint = "quality", inference_ms = elapsed as u64, "质量评估完成");
 
     let dto = QualityDto::from(&report);
+    // D3 指标:纯算法评估器,无模型(model=none)、无 permit,不记 queue_ms
+    state.otel.observe_inference_batch("quality", "none", elapsed);
 
     Ok(Json(json!({
         "status": "ok",
@@ -284,6 +286,12 @@ pub async fn pose(
     tracing::info!(endpoint = "pose", count, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("pose").await;
+    state.otel.observe_inference(
+        "pose",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {
@@ -316,6 +324,12 @@ pub async fn depth(
     tracing::info!(endpoint = "depth", inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("depth").await;
+    state.otel.observe_inference(
+        "depth",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {
@@ -347,6 +361,12 @@ pub async fn human_parsing(
     tracing::info!(endpoint = "human_parsing", inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("human_parsing").await;
+    state.otel.observe_inference(
+        "human_parsing",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {

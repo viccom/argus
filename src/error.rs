@@ -63,6 +63,13 @@ impl AppError {
     }
 }
 
+/// 错误指标标记(D3,obs-platform 05 §4.5):`into_response` 单点注入机读码到
+/// 响应 extensions,最外层 HTTP 指标中间件读取并关联 endpoint 记
+/// `argus.inference.errors_total`。extensions 不参与序列化,对客户端零可见。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ErrorMetric(pub &'static str);
+
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         // 服务错误统一返回 HTTP 200（信封语义），TraceLayer 按状态码分级失效，
@@ -85,7 +92,10 @@ impl IntoResponse for AppError {
                 "retryable": self.retryable(),
             }
         });
-        (StatusCode::OK, axum::Json(body)).into_response()
+        let mut resp = (StatusCode::OK, axum::Json(body)).into_response();
+        // D3:错误信封恒 HTTP 200,状态码无区分度——机读码进 extensions 供指标层取用
+        resp.extensions_mut().insert(ErrorMetric(self.code()));
+        resp
     }
 }
 
@@ -123,6 +133,16 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["data"]["code"], "bad_request");
         assert_eq!(json["data"]["retryable"], false);
+    }
+
+    #[test]
+    fn error_response_should_carry_metric_marker_in_extensions() {
+        // D3:恒 200 信封下错误只能靠 extensions 标记被指标层看到(不进 body)
+        let resp = AppError::Overload("busy".into()).into_response();
+        assert_eq!(
+            resp.extensions().get::<ErrorMetric>(),
+            Some(&ErrorMetric("overload"))
+        );
     }
 
     #[tokio::test]

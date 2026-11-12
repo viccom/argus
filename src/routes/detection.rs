@@ -278,6 +278,13 @@ pub(crate) async fn run_detect(
             None => (serde_json::Value::Null, serde_json::Value::Null),
         },
     };
+    // D3 指标(05 §4.5):与完成日志同源取数,不重复计时
+    state.otel.observe_inference(
+        endpoint,
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     data["model"] = model;
     data["pipeline"] = pipeline;
 
@@ -313,6 +320,12 @@ pub async fn detect_obb(
     tracing::info!(endpoint = "detect_obb", count, inference_ms = elapsed as u64, "推理完成");
 
     let (model, pipeline) = state.engines.provenance("obb").await;
+    state.otel.observe_inference(
+        "detect_obb",
+        model.as_str().unwrap_or("unknown"),
+        permit.queue_ms,
+        elapsed,
+    );
     Ok(Json(json!({
         "status": "ok",
         "data": {
